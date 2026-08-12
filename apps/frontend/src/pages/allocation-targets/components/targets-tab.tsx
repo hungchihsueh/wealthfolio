@@ -34,7 +34,6 @@ import type {
   AllocationTargetConstraint,
   ConstraintSubjectType,
   AccountScope,
-  RebalanceGoal,
   TargetScopeType,
   TaxonomyCategory,
 } from "@/lib/types";
@@ -42,7 +41,8 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { BUILT_IN_PRESETS, ModelPresetPicker, type ModelPreset } from "./model-preset-picker";
+import { ModelPresetPicker } from "./model-preset-picker";
+import { BUILT_IN_PRESETS, modelPresetTitle } from "./model-preset-data";
 import { TargetWeightEditor, type WeightDraft } from "./target-weight-editor";
 import { DriftBandSlider } from "./drift-band-slider";
 import { useTargetConstraints } from "../hooks/use-target-constraints";
@@ -96,21 +96,6 @@ function TargetScopeIcon({ scopeType }: { scopeType: TargetScopeType }) {
     return <Icons.CreditCard className="h-4 w-4 shrink-0 opacity-70" />;
   }
   return <Icons.Wallet className="h-4 w-4 shrink-0 opacity-70" />;
-}
-
-function currentPreset(
-  taxonomyId: string,
-  categories: CategoryAllocation[],
-  t: TFunction,
-): ModelPreset {
-  return {
-    id: "current",
-    taxonomyId,
-    name: t("allocation:presets.currentAllocation"),
-    description: t("allocation:presets.currentAllocationDescription"),
-    risk: "From holdings",
-    weights: Object.fromEntries(categories.map((c) => [c.categoryId, c.percentage])),
-  };
 }
 
 function categoriesForTaxonomy(
@@ -581,9 +566,6 @@ function TargetEditor({
     target ? target.relativeFactorBps / 100 : 20,
   );
   const [allowSells, setAllowSells] = useState(target?.allowSells ?? true);
-  const [rebalanceGoal, setRebalanceGoal] = useState<RebalanceGoal>(
-    target?.rebalanceGoal ?? "nearest_band",
-  );
   const [minTradeAmount, setMinTradeAmount] = useState(target?.minTradeAmount ?? "0");
   const [wholeSharesOnly, setWholeSharesOnly] = useState(target?.wholeSharesOnly ?? false);
   const [maxTurnoverPctDisplay, setMaxTurnoverPctDisplay] = useState(
@@ -631,12 +613,7 @@ function TargetEditor({
     () => BUILT_IN_PRESETS.filter((preset) => preset.taxonomyId === taxonomyId),
     [taxonomyId],
   );
-  const selectedPreset =
-    startId === "scratch" || startId === "saved"
-      ? null
-      : startId === "current"
-        ? currentPreset(taxonomyId, categories, t)
-        : (presets.find((preset) => preset.id === startId) ?? null);
+  const selectedPreset = presets.find((preset) => preset.id === startId) ?? null;
   const scope = target
     ? { scopeType: target.scopeType, scopeId: target.scopeId ?? null }
     : defaultScopeFromAccountScope(accountScope);
@@ -648,8 +625,16 @@ function TargetEditor({
           name: selectedTaxonomy?.name ?? t("allocation:editor.customFallback"),
         })
       : t("allocation:editor.suggestedTargetName", {
-          name:
-            selectedPreset?.name ?? selectedTaxonomy?.name ?? t("allocation:editor.customFallback"),
+          name: selectedPreset
+            ? modelPresetTitle(
+                selectedPreset,
+                targetCategories.map((category) => ({
+                  id: category.id,
+                  name: category.name,
+                  sortOrder: category.sortOrder,
+                })),
+              )
+            : (selectedTaxonomy?.name ?? t("allocation:editor.customFallback")),
         });
   const savedWeightDrafts = React.useMemo(
     () => (existingWeightsData ? savedWeightsToDraft(existingWeightsData) : null),
@@ -671,7 +656,6 @@ function TargetEditor({
       setBandType(resetTargetBandType);
       setRelativeFactorPct(resetTargetRelativeFactorBps / 100);
       setAllowSells(target?.allowSells ?? false);
-      setRebalanceGoal(target?.rebalanceGoal ?? "nearest_band");
       setMinTradeAmount(target?.minTradeAmount ?? "0");
       setWholeSharesOnly(target?.wholeSharesOnly ?? false);
       setMaxTurnoverPctDisplay(
@@ -686,7 +670,6 @@ function TargetEditor({
       setBandType("hybrid");
       setRelativeFactorPct(20);
       setAllowSells(true);
-      setRebalanceGoal("nearest_band");
       setMinTradeAmount("0");
       setWholeSharesOnly(false);
       setMaxTurnoverPctDisplay("");
@@ -706,8 +689,8 @@ function TargetEditor({
     resetTargetTaxonomyId,
     onUnsavedChange,
     target?.allowSells,
-    target?.rebalanceGoal,
     target?.minTradeAmount,
+    target?.maxTurnoverBps,
     target?.wholeSharesOnly,
   ]);
 
@@ -758,12 +741,31 @@ function TargetEditor({
   const totalBps = weights.reduce((sum, weight) => sum + weight.targetBps, 0);
   const isSaving = saveTarget.isPending;
   const canSave = !cannotTargetScope && targetName.trim().length > 0 && totalBps === 10000;
+  const saveActionDisabled = !canSave || isSaving || (!!target && !hasUnsavedChanges);
+  const saveActionLabel = isSaving
+    ? target
+      ? t("allocation:editor.saving")
+      : t("allocation:editor.creating")
+    : target
+      ? t("allocation:editor.saveTarget")
+      : t("allocation:editor.createTarget");
   const selectedStartName =
     startId === "saved"
       ? t("allocation:editor.savedTarget")
       : startId === "scratch"
         ? t("allocation:presets.buildFromScratch")
-        : (selectedPreset?.name ?? t("allocation:presets.currentAllocation"));
+        : startId === "current"
+          ? t("allocation:presets.currentAllocation")
+          : selectedPreset
+            ? modelPresetTitle(
+                selectedPreset,
+                targetCategories.map((category) => ({
+                  id: category.id,
+                  name: category.name,
+                  sortOrder: category.sortOrder,
+                })),
+              )
+            : t("allocation:presets.currentAllocation");
   const showEditorSkeleton =
     taxonomyLoading || (!!target && existingWeightsLoading && weights.length === 0);
 
@@ -781,7 +783,7 @@ function TargetEditor({
         bandType,
         relativeFactorBps: Math.round(relativeFactorPct * 100),
         allowSells,
-        rebalanceGoal,
+        rebalanceGoal: target?.rebalanceGoal ?? "nearest_band",
         minTradeAmount: minTradeAmount === "" ? "0" : minTradeAmount,
         wholeSharesOnly,
         maxTurnoverBps:
@@ -835,7 +837,6 @@ function TargetEditor({
       setBandType(target.bandType ?? "absolute");
       setRelativeFactorPct((target.relativeFactorBps ?? 2000) / 100);
       setAllowSells(target.allowSells ?? false);
-      setRebalanceGoal(target.rebalanceGoal ?? "nearest_band");
       setMinTradeAmount(target.minTradeAmount ?? "0");
       setWholeSharesOnly(target.wholeSharesOnly ?? false);
       setMaxTurnoverPctDisplay(
@@ -850,7 +851,6 @@ function TargetEditor({
       setDriftBandPct(1);
       setBandType("hybrid");
       setRelativeFactorPct(20);
-      setRebalanceGoal("nearest_band");
       setMinTradeAmount("0");
       setWholeSharesOnly(false);
       setWeights([]);
@@ -878,12 +878,8 @@ function TargetEditor({
           </Button>
           {target ? (
             <>
-              <Button
-                size="sm"
-                disabled={!canSave || isSaving || !hasUnsavedChanges}
-                onClick={() => persistTarget()}
-              >
-                {isSaving ? t("allocation:editor.saving") : t("allocation:editor.saveTarget")}
+              <Button size="sm" disabled={saveActionDisabled} onClick={() => persistTarget()}>
+                {saveActionLabel}
               </Button>
               {onDelete && (
                 <Button
@@ -899,8 +895,8 @@ function TargetEditor({
               )}
             </>
           ) : (
-            <Button size="sm" disabled={!canSave || isSaving} onClick={() => persistTarget()}>
-              {isSaving ? t("allocation:editor.creating") : t("allocation:editor.createTarget")}
+            <Button size="sm" disabled={saveActionDisabled} onClick={() => persistTarget()}>
+              {saveActionLabel}
             </Button>
           )}
         </div>
@@ -1044,36 +1040,12 @@ function TargetEditor({
                     { value: "allow_sells", label: t("allocation:editor.allowSells") },
                   ]}
                   rounded="lg"
-                  className="bg-muted/30 [&_button:has(>div)]:text-primary-foreground [&_button:not(:has(>div))]:text-muted-foreground [&_button>div]:bg-primary w-full border [&_button]:flex-1 [&_button]:py-2 [&_button]:text-[12px]"
+                  className="bg-muted/30 [&_button:has(>div)]:text-primary-foreground [&_button:not(:has(>div))]:text-muted-foreground [&_button>div]:bg-primary w-full items-stretch border [&_button]:h-auto [&_button]:min-h-8 [&_button]:flex-1 [&_button]:px-2 [&_button]:py-2 [&_button]:text-center [&_button]:text-[12px] [&_button]:leading-tight"
                 />
                 <p className="text-muted-foreground mt-2 text-[11px] leading-relaxed">
                   {allowSells
                     ? t("allocation:editor.modeSellNote")
                     : t("allocation:editor.modeBuyNote")}
-                </p>
-              </div>
-
-              <div>
-                <div className="text-foreground mb-2 text-[12.5px] font-medium">
-                  {t("allocation:editor.goal")}
-                </div>
-                <AnimatedToggleGroup<RebalanceGoal>
-                  value={rebalanceGoal}
-                  onValueChange={(v) => {
-                    setRebalanceGoal(v);
-                    markDirty();
-                  }}
-                  items={[
-                    { value: "nearest_band", label: t("allocation:editor.nearestBand") },
-                    { value: "exact_target", label: t("allocation:editor.exactTarget") },
-                  ]}
-                  rounded="lg"
-                  className="bg-muted/30 [&_button:has(>div)]:text-primary-foreground [&_button:not(:has(>div))]:text-muted-foreground [&_button>div]:bg-primary w-full border [&_button]:flex-1 [&_button]:py-2 [&_button]:text-[12px]"
-                />
-                <p className="text-muted-foreground mt-2 text-[11px] leading-relaxed">
-                  {rebalanceGoal === "exact_target"
-                    ? t("allocation:editor.goalExactNote")
-                    : t("allocation:editor.goalNearestNote")}
                 </p>
               </div>
 
@@ -1214,6 +1186,12 @@ function TargetEditor({
                 {t("allocation:editor.noCategoriesFound")}
               </p>
             )}
+
+            <div className="border-border/60 mt-6 flex justify-end border-t pt-4">
+              <Button disabled={saveActionDisabled} onClick={() => persistTarget()}>
+                {saveActionLabel}
+              </Button>
+            </div>
           </section>
 
           {target && allowSells && (

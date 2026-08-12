@@ -74,8 +74,8 @@ Visit the website at
 - **📈 Performance Analytics** - True time-weighted and money-weighted returns,
   benchmark comparison, and historical analysis
 - **💰 Activity Management** - Import and manage all your trading activities
-- **🎯 Goal Planning** - Set and track financial goals with allocation
-  management
+- **🎯 Goal & Allocation Planning** - Track financial goals and compare current
+  allocation with targets you define
 - **🔒 Local Data** - All data stored locally with no cloud dependencies
 - **🔄 Optional Broker Sync** - Auto-sync 30+ brokerages with
   [Wealthfolio Connect](https://wealthfolio.app/connect?utm_source=github&utm_medium=readme)

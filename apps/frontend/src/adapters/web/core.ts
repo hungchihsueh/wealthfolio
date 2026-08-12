@@ -399,7 +399,10 @@ export const COMMANDS: CommandMap = {
   get_allocation_target_drift: { method: "POST", path: "/allocation-targets" },
   list_target_constraints: { method: "GET", path: "/allocation-targets" },
   save_target_constraints: { method: "POST", path: "/allocation-targets" },
-  calculate_rebalance_plan: { method: "POST", path: "/allocation-targets/rebalance/calculate" },
+  calculate_allocation_worksheet: {
+    method: "POST",
+    path: "/allocation-targets/worksheet/calculate",
+  },
   // Alternative Assets
   create_alternative_asset: { method: "POST", path: "/alternative-assets" },
   update_alternative_asset_valuation: { method: "PUT", path: "/alternative-assets" },
@@ -1990,18 +1993,18 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       body = JSON.stringify(constraints);
       break;
     }
-    case "calculate_rebalance_plan": {
-      const { targetId, availableCash, filter, scenarioMode } = payload as {
+    case "calculate_allocation_worksheet": {
+      const { targetId, cash, lines, filter } = payload as {
         targetId: string;
-        availableCash: number;
+        cash: Record<string, string>;
+        lines: unknown[];
         filter: unknown;
-        scenarioMode: string;
       };
       body = JSON.stringify({
         targetId,
-        availableCash,
+        cash,
+        lines,
         filter,
-        scenarioMode,
       });
       break;
     }

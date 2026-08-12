@@ -21,7 +21,7 @@ use wealthfolio_core::{
     limits::ContributionLimitService,
     portfolio::{
         allocation::AllocationService,
-        allocation_targets::{AllocationTargetService, DriftService, RebalanceService},
+        allocation_targets::{AllocationTargetService, AllocationWorksheetService, DriftService},
         holdings::{HoldingsService, HoldingsValuationService},
         income::IncomeService,
         net_worth::NetWorthService,
@@ -470,11 +470,14 @@ pub async fn initialize_context(
         .with_holdings_service(holdings_service.clone())
         .with_taxonomy_service(taxonomy_service.clone()),
     );
-    let rebalance_service = Arc::new(RebalanceService::new(
+    let allocation_worksheet_service = Arc::new(AllocationWorksheetService::new(
         allocation_target_service.clone(),
         drift_service.clone(),
-        allocation_service.clone(),
         holdings_service.clone(),
+        asset_service.clone(),
+        taxonomy_service.clone(),
+        quote_service.clone(),
+        fx_service.clone(),
     ));
 
     let net_worth_service = Arc::new(NetWorthService::new(
@@ -622,7 +625,7 @@ pub async fn initialize_context(
             allocation_service,
             allocation_target_service,
             drift_service,
-            rebalance_service,
+            allocation_worksheet_service,
             valuation_service,
             net_worth_service,
             sync_service,

@@ -1,4 +1,3 @@
-import { useBalancePrivacy } from "@/hooks/use-balance-privacy";
 import { useTaxonomy } from "@/hooks/use-taxonomies";
 import { cn } from "@/lib/utils";
 import type { DriftReport, DriftRow, AllocationTarget } from "@/lib/types";
@@ -14,9 +13,7 @@ import {
   formatDriftBps,
   hasVisibleAllocation,
   isOutOfBand,
-  rebalanceMove,
 } from "@/pages/allocation-targets/components/drift-row-utils";
-import { formatCompact } from "./allocation-derivations";
 
 interface TargetRailsCardProps {
   targets: AllocationTarget[];
@@ -27,6 +24,8 @@ interface TargetRailsCardProps {
   onCreateTarget?: () => void;
   /** Opens the full current-vs-target analysis. */
   onViewDetails?: () => void;
+  /** Opens the user-authored rebalancing worksheet. */
+  onOpenWorksheet?: () => void;
 }
 
 function driftClass(row: DriftRow): string {
@@ -43,9 +42,9 @@ export function TargetRailsCard({
   isLoading,
   onCreateTarget,
   onViewDetails,
+  onOpenWorksheet,
 }: TargetRailsCardProps) {
   const { t } = useTranslation();
-  const { isBalanceHidden } = useBalancePrivacy();
   const selectedTarget = targets.find((target) => target.id === selectedTargetId) ?? null;
   const { data: taxonomy } = useTaxonomy(selectedTarget?.taxonomyId ?? null);
   const resolvedDriftReport = driftReport
@@ -66,8 +65,17 @@ export function TargetRailsCard({
   }
 
   const hasTarget = !!resolvedDriftReport;
-  const currency = resolvedDriftReport?.baseCurrency ?? "USD";
-  const rows = resolvedDriftReport?.rows.filter(hasVisibleAllocation) ?? [];
+  const categoryOrder = new Map(
+    [...(taxonomy?.categories ?? [])]
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+      .map((category, index) => [category.id, index]),
+  );
+  const rows = [...(resolvedDriftReport?.rows.filter(hasVisibleAllocation) ?? [])].sort(
+    (a, b) =>
+      (categoryOrder.get(a.categoryId) ?? Number.MAX_SAFE_INTEGER) -
+        (categoryOrder.get(b.categoryId) ?? Number.MAX_SAFE_INTEGER) ||
+      a.categoryName.localeCompare(b.categoryName),
+  );
 
   const toleranceLabel = (() => {
     const requiredRows = rows.filter((r) => r.isRequired && r.targetBps > 0);
@@ -85,23 +93,12 @@ export function TargetRailsCard({
   const maxScale =
     Math.max(1, ...rows.flatMap((r) => [r.currentBps / 100, r.targetBps / 100])) * 1.08;
   const withinTolerance = resolvedDriftReport ? resolvedDriftReport.outOfBandCount === 0 : false;
-  const largestGapRow = rows
-    .filter(isOutOfBand)
-    .sort((a, b) => Math.abs(b.driftBps) - Math.abs(a.driftBps))[0];
-  const largestGapLabel = formatDriftBps(
-    largestGapRow?.driftBps ?? resolvedDriftReport?.maxDriftBps ?? 0,
-  );
-
-  // Suggested rebalance moves for the out-of-range categories, largest first.
-  const moves = rows
+  const differences = rows
     .map((row, index) => ({
       row,
       color: allocationTargetColorForRow(row, colorByCategory, index),
     }))
-    .filter(({ row }) => isOutOfBand(row))
-    .sort((a, b) => Math.abs(b.row.valueDelta) - Math.abs(a.row.valueDelta));
-  const money = (value: number) =>
-    isBalanceHidden ? "••••" : formatCompact(Math.abs(value), currency);
+    .filter(({ row }) => isOutOfBand(row));
 
   return (
     <Card className="flex flex-col gap-4 p-5 xl:h-full">
@@ -187,55 +184,52 @@ export function TargetRailsCard({
             })}
           </div>
 
-          {/* Suggested moves — fills the remaining height */}
+          {/* Descriptive target differences — taxonomy order. */}
           <div className="flex flex-col pt-5 xl:flex-1">
             <div className="text-muted-foreground mb-2 text-[10px] font-semibold uppercase tracking-wider">
-              {t("insights:insights.rails.suggested_moves")}
+              {t("insights:insights.rails.target_differences")}
             </div>
-            {moves.length === 0 ? (
+            {differences.length === 0 ? (
               <div className="text-muted-foreground flex flex-col items-center justify-center gap-1.5 py-4 text-center xl:flex-1">
-                <Icons.CheckCircle className="text-success h-6 w-6" />
+                <Icons.Target className="h-6 w-6" />
                 <span className="text-[12px]">{t("insights:insights.rails.all_in_range")}</span>
               </div>
             ) : (
               <div className="flex flex-col gap-2.5">
-                {moves.slice(0, 6).map(({ row, color }) => {
-                  const move = rebalanceMove(row);
-                  const add = move.action === "Add";
-                  return (
-                    <div
-                      key={row.categoryId}
-                      className="flex items-center justify-between gap-2 text-[12px]"
-                    >
-                      <span className="flex min-w-0 items-center gap-2">
-                        <span
-                          className="h-2 w-2 shrink-0 rounded-sm"
-                          style={{ background: color }}
-                        />
-                        <span className="text-muted-foreground">
-                          {add
-                            ? t("insights:insights.rails.add")
-                            : t("insights:insights.rails.trim")}
-                        </span>
-                        <span className="text-foreground truncate font-medium">
-                          {row.categoryName}
-                        </span>
+                {differences.slice(0, 6).map(({ row, color }) => (
+                  <div
+                    key={row.categoryId}
+                    className="flex items-center justify-between gap-2 text-[12px]"
+                  >
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="h-2 w-2 shrink-0 rounded-sm" style={{ background: color }} />
+                      <span className="text-foreground truncate font-medium">
+                        {row.categoryName}
                       </span>
-                      <span
-                        className={cn(
-                          "shrink-0 font-bold tabular-nums",
-                          add ? "text-success" : "text-destructive",
-                        )}
-                      >
-                        {add ? "+" : "−"}
-                        {money(move.amount)}
-                      </span>
-                    </div>
-                  );
-                })}
+                    </span>
+                    <span className="text-muted-foreground shrink-0 font-medium tabular-nums">
+                      {row.driftBps > 0
+                        ? t("insights:insights.rails.above_target_by", {
+                            difference: formatDriftBps(Math.abs(row.driftBps)),
+                          })
+                        : t("insights:insights.rails.below_target_by", {
+                            difference: formatDriftBps(Math.abs(row.driftBps)),
+                          })}
+                    </span>
+                  </div>
+                ))}
               </div>
             )}
           </div>
+
+          <p className="text-muted-foreground text-[11px] leading-relaxed">
+            {t("insights:insights.rails.descriptive_disclosure")}
+          </p>
+          {onOpenWorksheet && (
+            <Button variant="outline" size="sm" onClick={onOpenWorksheet} className="w-fit">
+              {t("insights:insights.rails.open_worksheet")}
+            </Button>
+          )}
 
           {/* Bottom status */}
           <div
@@ -243,13 +237,13 @@ export function TargetRailsCard({
               "mt-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-[11px] font-semibold xl:mt-auto",
               withinTolerance
                 ? "border-success/15 bg-success/[0.04] text-success"
-                : "border-warning/15 bg-warning/[0.05] text-warning",
+                : "border-border bg-muted/30 text-muted-foreground",
             )}
           >
             <span
               className={cn(
                 "h-1.5 w-1.5 rounded-full",
-                withinTolerance ? "bg-success" : "bg-warning",
+                withinTolerance ? "bg-success" : "bg-muted-foreground",
               )}
             />
             <span className="min-w-0 flex-1 truncate">
@@ -257,7 +251,6 @@ export function TargetRailsCard({
                 ? t("insights:insights.rails.inside_target_range")
                 : t("insights:insights.rails.outside_range", {
                     count: resolvedDriftReport?.outOfBandCount ?? 0,
-                    gap: largestGapLabel,
                   })}
             </span>
             <span className="shrink-0 tabular-nums">

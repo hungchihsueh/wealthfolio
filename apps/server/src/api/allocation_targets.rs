@@ -6,14 +6,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use rust_decimal::Decimal;
 use serde::Deserialize;
 use wealthfolio_core::{
     accounts::AccountPurpose,
     portfolio::allocation_targets::{
         AllocationTarget, AllocationTargetConstraint, AllocationTargetWeight,
-        CalculateRebalancePlanInput, DriftReport, NewAllocationTarget, NewAllocationTargetWeight,
-        RebalancePlan, SaveAllocationTargetResult, ScenarioMode, ScopeType,
+        AllocationWorksheetLineInput, AllocationWorksheetResult, CalculateAllocationWorksheetInput,
+        DriftReport, NewAllocationTarget, NewAllocationTargetWeight, SaveAllocationTargetResult,
+        ScopeType, WorksheetCashInput,
     },
     portfolios::AccountScope,
 };
@@ -198,53 +198,78 @@ async fn get_drift_for_target(
     Ok(Json(report))
 }
 
-// ── Rebalance ─────────────────────────────────────────────────────────────────
+// ── Allocation worksheet ──────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CalculatePlanBody {
+struct CalculateWorksheetBody {
     target_id: String,
-    available_cash: Decimal,
-    #[serde(default)]
-    scenario_mode: ScenarioMode,
+    cash: WorksheetCashInput,
+    lines: Vec<AllocationWorksheetLineInput>,
     filter: AccountScope,
 }
 
-fn resolve_rebalance_input(
+fn resolve_worksheet_input(
     state: &Arc<AppState>,
     target_id: String,
-    available_cash: Decimal,
-    scenario_mode: ScenarioMode,
+    cash: WorksheetCashInput,
+    lines: Vec<AllocationWorksheetLineInput>,
     filter: &AccountScope,
-) -> ApiResult<CalculateRebalancePlanInput> {
+) -> ApiResult<CalculateAllocationWorksheetInput> {
     let base_currency = state.base_currency.read().unwrap().clone();
-    let resolved = state
+    let requested = state
         .portfolio_service
         .resolve_account_scope_for_purpose(filter, &base_currency, AccountPurpose::Holdings)
         .map_err(crate::error::ApiError::from)?;
-    Ok(CalculateRebalancePlanInput {
+    let target = state
+        .allocation_target_service
+        .get_target(&target_id)?
+        .ok_or(ApiError::NotFound)?;
+    let target_filter = account_scope_for_target(&target)?;
+    let resolved = state
+        .portfolio_service
+        .resolve_account_scope_for_purpose(&target_filter, &base_currency, AccountPurpose::Holdings)
+        .map_err(crate::error::ApiError::from)?;
+    let mut requested_ids = requested.account_ids;
+    let mut target_ids = resolved.account_ids.clone();
+    requested_ids.sort();
+    target_ids.sort();
+    if requested_ids != target_ids {
+        return Err(ApiError::BadRequest(
+            "Worksheet page scope does not match the selected target scope".to_string(),
+        ));
+    }
+    Ok(CalculateAllocationWorksheetInput {
         target_id,
-        available_cash,
+        cash,
+        lines,
         account_ids: resolved.account_ids,
         base_currency,
         aggregated_account_id: resolved.scope_id,
-        scenario_mode,
     })
 }
 
-async fn calculate_plan(
+async fn calculate_worksheet(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<CalculatePlanBody>,
-) -> ApiResult<Json<RebalancePlan>> {
-    let input = resolve_rebalance_input(
-        &state,
-        body.target_id,
-        body.available_cash,
-        body.scenario_mode,
-        &body.filter,
-    )?;
-    let plan = state.rebalance_service.calculate_plan(input).await?;
-    Ok(Json(plan))
+    Json(body): Json<CalculateWorksheetBody>,
+) -> ApiResult<Json<AllocationWorksheetResult>> {
+    let input =
+        resolve_worksheet_input(&state, body.target_id, body.cash, body.lines, &body.filter)?;
+    let result = state
+        .allocation_worksheet_service
+        .calculate_worksheet(input)
+        .await?;
+    Ok(Json(result))
+}
+
+async fn retired_rebalance_endpoint() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::GONE,
+        Json(serde_json::json!({
+            "error": "Automated rebalancing has been removed.",
+            "replacement": "/allocation-targets/worksheet/calculate"
+        })),
+    )
 }
 
 // ── Sell constraints ─────────────────────────────────────────────────────────
@@ -295,7 +320,26 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/allocation-targets/{id}/drift", post(get_drift_for_target))
         .route(
-            "/allocation-targets/rebalance/calculate",
-            post(calculate_plan),
+            "/allocation-targets/worksheet/calculate",
+            post(calculate_worksheet),
         )
+        .route(
+            "/allocation-targets/rebalance/calculate",
+            post(retired_rebalance_endpoint),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retired_endpoint_returns_gone_and_replacement_without_calculating() {
+        let (status, Json(body)) = retired_rebalance_endpoint().await;
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(
+            body.get("replacement").and_then(|value| value.as_str()),
+            Some("/allocation-targets/worksheet/calculate")
+        );
+    }
 }

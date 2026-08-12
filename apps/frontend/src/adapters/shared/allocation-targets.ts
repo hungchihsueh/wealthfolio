@@ -6,9 +6,10 @@ import type {
   AllocationTargetWeight,
   AllocationTarget,
   SaveAllocationTargetResult,
-  RebalancePlan,
+  AllocationWorksheetLineInput,
+  AllocationWorksheetResult,
   AllocationTargetConstraint,
-  ScenarioMode,
+  WorksheetCashInput,
 } from "@/lib/types";
 
 import { invoke } from "./platform";
@@ -103,18 +104,18 @@ export const saveTargetConstraints = async (
   });
 };
 
-// ── Rebalance ─────────────────────────────────────────────────────────────────
+// ── Allocation worksheet ──────────────────────────────────────────────────────
 
-export const calculateRebalancePlan = async (
+export const calculateAllocationWorksheet = async (
   targetId: string,
-  availableCash: number,
+  cash: WorksheetCashInput,
+  lines: AllocationWorksheetLineInput[],
   filter: AccountScope,
-  scenarioMode: ScenarioMode = "cash_flow_only",
-): Promise<RebalancePlan> => {
-  return invoke<RebalancePlan>("calculate_rebalance_plan", {
+): Promise<AllocationWorksheetResult> => {
+  return invoke<AllocationWorksheetResult>("calculate_allocation_worksheet", {
     targetId,
-    availableCash,
+    cash,
+    lines,
     filter,
-    scenarioMode,
   });
 };

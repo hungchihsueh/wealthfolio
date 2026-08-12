@@ -2,7 +2,6 @@ import { useMemo } from "react";
 import { Button, Card, CardContent, CardHeader, CardTitle, CardDescription } from "@wealthfolio/ui";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { cn } from "@/lib/utils";
 import type { DriftReport, DriftRow } from "@/lib/types";
 import {
   allocationTargetColorForRow,
@@ -15,7 +14,7 @@ interface DriftDriversCardProps {
   report: DriftReport;
   statusDescription: string;
   bandLabel?: string | null;
-  onRebalanceClick?: () => void;
+  onWorksheetClick?: () => void;
 }
 
 function formatPercent(bps: number, decimals = 1): string {
@@ -35,7 +34,6 @@ function buildDriver(row: DriftRow, currency: string, t: TFunction) {
       title: t("allocation:drivers.outsideTargetTitle", { category: row.categoryName }),
       detail: t("allocation:drivers.notTargetedDetail", { current, amount }),
       drift,
-      isOver: true,
     };
   }
 
@@ -44,41 +42,27 @@ function buildDriver(row: DriftRow, currency: string, t: TFunction) {
       title: t("allocation:drivers.aboveTargetTitle", { category: row.categoryName }),
       detail: t("allocation:drivers.overweightDetail", { current, target, amount }),
       drift,
-      isOver: true,
     };
   }
   return {
     title: t("allocation:drivers.belowTargetTitle", { category: row.categoryName }),
     detail: t("allocation:drivers.underweightDetail", { current, target, amount }),
     drift,
-    isOver: false,
   };
-}
-
-function markerTextColor(color: string): string {
-  const hex = color.replace("#", "");
-  if (hex.length !== 6) return "var(--background)";
-  const r = parseInt(hex.slice(0, 2), 16);
-  const g = parseInt(hex.slice(2, 4), 16);
-  const b = parseInt(hex.slice(4, 6), 16);
-  const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-  return luminance > 0.58 ? "var(--foreground)" : "var(--background)";
 }
 
 export function DriftDriversCard({
   report,
   statusDescription,
   bandLabel,
-  onRebalanceClick,
+  onWorksheetClick,
 }: DriftDriversCardProps) {
   const { t } = useTranslation();
   const colorByCategory = useMemo(() => buildAllocationTargetColorMap(report.rows), [report.rows]);
-  const oobRows = report.rows
-    .filter(isOutOfBand)
-    .sort((a, b) => Math.abs(b.driftBps) - Math.abs(a.driftBps));
+  const oobRows = report.rows.filter(isOutOfBand);
   const visibleRows = oobRows.slice(0, 3);
   const remainingRows = oobRows.slice(3);
-  const showRebalanceCta = oobRows.length > 0 && onRebalanceClick;
+  const showWorksheetCta = !!onWorksheetClick;
 
   return (
     <Card className="flex h-full flex-col">
@@ -97,7 +81,7 @@ export function DriftDriversCard({
       <CardContent className="flex flex-1 flex-col">
         {oobRows.length === 0 ? (
           <p className="text-muted-foreground py-6 text-center text-[13px]">
-            {t("allocation:drivers.noActionRequired", { status: statusDescription })}
+            {t("allocation:drivers.withinSelectedRange", { status: statusDescription })}
           </p>
         ) : (
           <ul className="space-y-3">
@@ -109,24 +93,14 @@ export function DriftDriversCard({
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex min-w-0 items-center gap-2.5">
                       <span
-                        className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold tabular-nums"
-                        style={{
-                          backgroundColor: rowColor,
-                          color: markerTextColor(rowColor),
-                        }}
-                      >
-                        {index + 1}
-                      </span>
+                        className="h-2.5 w-2.5 shrink-0 rounded-sm"
+                        style={{ backgroundColor: rowColor }}
+                      />
                       <p className="text-foreground truncate text-[13px] font-semibold leading-snug">
                         {driver.title}
                       </p>
                     </div>
-                    <span
-                      className={cn(
-                        "shrink-0 text-[12.5px] font-bold tabular-nums",
-                        driver.isOver ? "text-destructive" : "text-blue-600 dark:text-blue-400",
-                      )}
-                    >
+                    <span className="text-muted-foreground shrink-0 text-[12.5px] font-semibold tabular-nums">
                       {driver.drift}
                     </span>
                   </div>
@@ -151,10 +125,10 @@ export function DriftDriversCard({
             )}
           </ul>
         )}
-        {showRebalanceCta && (
+        {showWorksheetCta && (
           <div className="mt-auto pt-4">
-            <Button size="sm" onClick={onRebalanceClick} className="w-fit">
-              {t("allocation:drivers.reviewRebalance")}
+            <Button size="sm" onClick={onWorksheetClick} className="w-fit">
+              {t("allocation:drivers.openWorksheet")}
             </Button>
           </div>
         )}

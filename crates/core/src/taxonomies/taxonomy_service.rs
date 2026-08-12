@@ -137,6 +137,20 @@ impl TaxonomyService {
             self.repository
                 .get_taxonomy_with_categories(taxonomy_id)?
                 .ok_or_else(|| DatabaseError::NotFound("Taxonomy not found".to_string()))?;
+        Self::validate_asset_assignments(
+            &taxonomy_with_categories,
+            asset_id,
+            taxonomy_id,
+            assignments,
+        )
+    }
+
+    fn validate_asset_assignments(
+        taxonomy_with_categories: &TaxonomyWithCategories,
+        asset_id: &str,
+        taxonomy_id: &str,
+        assignments: &[NewAssetTaxonomyAssignment],
+    ) -> Result<()> {
         let category_ids = taxonomy_with_categories
             .categories
             .iter()
@@ -205,6 +219,33 @@ impl TaxonomyService {
         }
 
         Ok(())
+    }
+
+    fn assignments_after_upsert(
+        existing: &[AssetTaxonomyAssignment],
+        assignment: &NewAssetTaxonomyAssignment,
+        is_single_select: bool,
+    ) -> Vec<NewAssetTaxonomyAssignment> {
+        if is_single_select {
+            return vec![assignment.clone()];
+        }
+
+        existing
+            .iter()
+            .filter(|current| {
+                current.taxonomy_id == assignment.taxonomy_id
+                    && current.category_id != assignment.category_id
+            })
+            .map(|current| NewAssetTaxonomyAssignment {
+                id: Some(current.id.clone()),
+                asset_id: current.asset_id.clone(),
+                taxonomy_id: current.taxonomy_id.clone(),
+                category_id: current.category_id.clone(),
+                weight: current.weight,
+                source: current.source.clone(),
+            })
+            .chain(std::iter::once(assignment.clone()))
+            .collect()
     }
 }
 
@@ -401,15 +442,22 @@ impl TaxonomyServiceTrait for TaxonomyService {
     ) -> Result<AssetTaxonomyAssignment> {
         let asset_id = assignment.asset_id.clone();
         let taxonomy_id = assignment.taxonomy_id.clone();
+        let taxonomy = self
+            .repository
+            .get_taxonomy_with_categories(&taxonomy_id)?
+            .ok_or_else(|| DatabaseError::NotFound("Taxonomy not found".to_string()))?;
+        let existing = self.repository.get_asset_assignments(&asset_id)?;
+        let assignments = Self::assignments_after_upsert(
+            &existing,
+            &assignment,
+            taxonomy.taxonomy.is_single_select,
+        );
+        Self::validate_asset_assignments(&taxonomy, &asset_id, &taxonomy_id, &assignments)?;
 
-        // Check if taxonomy is single-select
-        if let Some(taxonomy) = self.repository.get_taxonomy(&assignment.taxonomy_id)? {
-            if taxonomy.is_single_select {
-                // Delete any existing assignments for this asset+taxonomy before creating new one
-                self.repository
-                    .delete_asset_assignments(&assignment.asset_id, &assignment.taxonomy_id)
-                    .await?;
-            }
+        if taxonomy.taxonomy.is_single_select {
+            self.repository
+                .delete_asset_assignments(&asset_id, &taxonomy_id)
+                .await?;
         }
 
         let created = self.repository.upsert_assignment(assignment).await?;
@@ -441,5 +489,104 @@ impl TaxonomyServiceTrait for TaxonomyService {
             self.emit_asset_classifications_changed(Vec::new(), Vec::new());
         }
         Ok(deleted)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn taxonomy() -> TaxonomyWithCategories {
+        let now = Utc::now().naive_utc();
+        TaxonomyWithCategories {
+            taxonomy: Taxonomy {
+                id: "taxonomy".to_string(),
+                name: "Asset classes".to_string(),
+                color: "#000000".to_string(),
+                description: None,
+                is_system: false,
+                is_single_select: false,
+                sort_order: 0,
+                created_at: now,
+                updated_at: now,
+                scope: "asset".to_string(),
+            },
+            categories: ["equity", "fixed-income"]
+                .into_iter()
+                .map(|id| Category {
+                    id: id.to_string(),
+                    taxonomy_id: "taxonomy".to_string(),
+                    parent_id: None,
+                    name: id.to_string(),
+                    key: id.to_string(),
+                    color: "#000000".to_string(),
+                    description: None,
+                    sort_order: 0,
+                    created_at: now,
+                    updated_at: now,
+                    icon: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn assignment(category_id: &str, weight: i32) -> NewAssetTaxonomyAssignment {
+        NewAssetTaxonomyAssignment {
+            id: None,
+            asset_id: "asset".to_string(),
+            taxonomy_id: "taxonomy".to_string(),
+            category_id: category_id.to_string(),
+            weight,
+            source: "manual".to_string(),
+        }
+    }
+
+    #[test]
+    fn incremental_assignment_rejects_a_total_above_one_hundred_percent() {
+        let now = Utc::now().naive_utc();
+        let existing = vec![AssetTaxonomyAssignment {
+            id: "assignment-1".to_string(),
+            asset_id: "asset".to_string(),
+            taxonomy_id: "taxonomy".to_string(),
+            category_id: "equity".to_string(),
+            weight: 10_000,
+            source: "manual".to_string(),
+            created_at: now,
+            updated_at: now,
+        }];
+        let incoming = assignment("fixed-income", 10_000);
+        let assignments = TaxonomyService::assignments_after_upsert(&existing, &incoming, false);
+
+        let result = TaxonomyService::validate_asset_assignments(
+            &taxonomy(),
+            "asset",
+            "taxonomy",
+            &assignments,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn incremental_assignment_replaces_the_existing_category_weight() {
+        let now = Utc::now().naive_utc();
+        let existing = vec![AssetTaxonomyAssignment {
+            id: "assignment-1".to_string(),
+            asset_id: "asset".to_string(),
+            taxonomy_id: "taxonomy".to_string(),
+            category_id: "equity".to_string(),
+            weight: 10_000,
+            source: "manual".to_string(),
+            created_at: now,
+            updated_at: now,
+        }];
+        let incoming = assignment("equity", 6_000);
+        let assignments = TaxonomyService::assignments_after_upsert(&existing, &incoming, false);
+
+        TaxonomyService::validate_asset_assignments(&taxonomy(), "asset", "taxonomy", &assignments)
+            .expect("updating one category should not count its previous weight twice");
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].weight, 6_000);
     }
 }

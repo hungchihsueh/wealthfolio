@@ -190,10 +190,6 @@ export function TargetWeightEditor({
     };
   });
 
-  const biggestMove = [...rows]
-    .filter((row) => Math.abs(row.drift) > row.bandPct)
-    .sort((a, b) => Math.abs(b.drift) - Math.abs(a.drift))[0];
-
   return (
     <div className="space-y-1 overflow-x-auto">
       <div className="min-w-[58rem]">
@@ -368,23 +364,6 @@ export function TargetWeightEditor({
             </p>
           )}
         </div>
-        {biggestMove && (
-          <p className="text-muted-foreground border-t px-1 pt-3 text-[12px]">
-            {t("allocation:editor.biggestMovePrefix")}{" "}
-            <span className="text-foreground font-medium">
-              {biggestMove.drift > 0
-                ? t("allocation:editor.biggestMoveTrim", {
-                    category: biggestMove.cat.name,
-                    value: Math.abs(biggestMove.drift).toFixed(1),
-                  })
-                : t("allocation:editor.biggestMoveAdd", {
-                    category: biggestMove.cat.name,
-                    value: Math.abs(biggestMove.drift).toFixed(1),
-                  })}
-            </span>
-            .
-          </p>
-        )}
       </div>
     </div>
   );

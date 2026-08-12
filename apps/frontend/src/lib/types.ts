@@ -2535,7 +2535,6 @@ export interface SaveUpProjectionPointDTO extends SaveUpTrajectoryPointDTO {
 export type TargetScopeType = "all" | "portfolio" | "account";
 export type TriggerType = "manual" | "threshold";
 export type RebalanceGoal = "nearest_band" | "exact_target";
-export type ScenarioMode = "cash_flow_only" | "sell_to_rebalance" | "hybrid";
 export type DriftStatus = "in_band" | "underweight" | "overweight" | "not_targeted";
 export type RebalanceTo = "nearest_band" | "exact_target";
 
@@ -2674,44 +2673,115 @@ export interface DriftHoldingsReport {
   rows: DriftHoldingRow[];
 }
 
-export type RebalanceWarningKind =
-  | "missing_quote"
-  | "no_buy_candidate"
-  | "tagged_cash"
+export type WorksheetDirection = "increase" | "reduce";
+export type WorksheetInputMode = "amount" | "quantity";
+export type WorksheetWarningKind =
+  | "stale_quote"
+  | "stale_fx"
   | "unclassified_asset"
   | "partial_classification"
-  | "constraint_skipped_sell"
-  | "turnover_cap_reached";
+  | "external_contribution"
+  | "below_minimum_line"
+  | "turnover_exceeded"
+  | "avoid_constraint";
 
-export interface RebalanceWarning {
-  kind: RebalanceWarningKind;
-  categoryId: string;
+export interface WorksheetWarning {
+  id: string;
+  kind: WorksheetWarningKind;
+  lineId?: string | null;
   message: string;
+  acknowledgementRequired: boolean;
 }
 
-export interface SuggestedManualTrade {
-  action: string;
+export interface WorksheetCashInput {
+  trackedCashToUse: string;
+  externalContribution: string;
+}
+
+export interface AllocationWorksheetLineInput {
+  lineId: string;
+  direction: WorksheetDirection;
+  assetId: string;
+  accountId: string;
+  inputMode: WorksheetInputMode;
+  value: string;
+}
+
+export interface WorksheetPricingSource {
+  id: string;
+  sourceType: string;
+  value: number;
+  fromCurrency: string;
+  toCurrency: string;
+  timestamp: string;
+  isStale: boolean;
+}
+
+export interface WorksheetCategoryExposure {
   categoryId: string;
   categoryName: string;
-  assetId?: string | null;
-  accountId?: string | null;
-  holdingId?: string | null;
-  symbol?: string | null;
-  name?: string | null;
-  quantity?: number | null;
-  estimatedPrice?: number | null;
-  estimatedAmount: number;
-  reason: string;
+  weightBps: number;
+  valueDelta: number;
+  isUnclassified: boolean;
 }
 
-export interface RebalancePlan {
+export interface AllocationWorksheetLineResult {
+  lineId: string;
+  direction: WorksheetDirection;
+  assetId: string;
+  accountId: string;
+  symbol: string;
+  name: string;
+  inputMode: WorksheetInputMode;
+  inputValue: number;
+  quantity: number;
+  unitPrice: number;
+  estimatedAmount: number;
+  contractMultiplier: number;
+  quoteSource: WorksheetPricingSource;
+  fxSource?: WorksheetPricingSource | null;
+  categoryExposures: WorksheetCategoryExposure[];
+}
+
+export interface WorksheetCategoryResult {
+  categoryId: string;
+  categoryName: string;
+  color: string;
+  targetBps: number;
+  currentValue: number;
+  projectedValue: number;
+  currentBps: number;
+  projectedBps: number;
+  currentDifferenceBps: number;
+  projectedDifferenceBps: number;
+  isCash: boolean;
+  isUnclassified: boolean;
+}
+
+export interface WorksheetSourceRecord {
+  sourceType: string;
+  id: string;
+  version: string;
+  details: string;
+}
+
+export interface AllocationWorksheetResult {
   targetId: string;
-  availableCash: number;
-  cashUsed: number;
+  targetName: string;
+  baseCurrency: string;
+  calculatedAt: string;
+  sourceFingerprint: string;
+  resolvedAccountIds: string[];
+  observedTrackedCash: number;
+  trackedCashToUse: number;
+  externalContribution: number;
+  increaseTotal: number;
+  reductionTotal: number;
   cashRemaining: number;
-  maxDriftBpsBefore: number;
-  maxDriftBpsAfter: number;
-  trades: SuggestedManualTrade[];
-  warnings: RebalanceWarning[];
-  afterBpsByCategory: Record<string, number>;
+  maxDifferenceBpsBefore: number;
+  maxDifferenceBpsAfter: number;
+  lines: AllocationWorksheetLineResult[];
+  categories: WorksheetCategoryResult[];
+  warnings: WorksheetWarning[];
+  sourceRecords: WorksheetSourceRecord[];
 }

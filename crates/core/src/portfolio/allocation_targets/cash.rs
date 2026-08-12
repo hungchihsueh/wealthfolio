@@ -15,10 +15,6 @@ fn deployable_cash_category_ids(taxonomy_id: &str) -> &'static [&'static str] {
     }
 }
 
-pub(super) fn has_deployable_cash_categories(taxonomy_id: &str) -> bool {
-    !deployable_cash_category_ids(taxonomy_id).is_empty()
-}
-
 pub(super) fn is_deployable_cash_category(taxonomy_id: &str, category_id: &str) -> bool {
     deployable_cash_category_ids(taxonomy_id).contains(&category_id)
 }

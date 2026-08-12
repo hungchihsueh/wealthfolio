@@ -353,7 +353,7 @@ export {
 // Allocation Target Commands
 export {
   archiveAllocationTarget,
-  calculateRebalancePlan,
+  calculateAllocationWorksheet,
   createAllocationTarget,
   deleteAllocationTarget,
   getAllocationTargetDrift,

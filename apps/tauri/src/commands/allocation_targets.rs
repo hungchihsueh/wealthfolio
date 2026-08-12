@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use tauri::State;
 
-use rust_decimal::Decimal;
 use wealthfolio_core::{
     accounts::AccountPurpose,
     portfolio::allocation_targets::{
         AllocationTarget, AllocationTargetConstraint, AllocationTargetWeight,
-        CalculateRebalancePlanInput, DriftReport, NewAllocationTarget, NewAllocationTargetWeight,
-        RebalancePlan, SaveAllocationTargetResult, ScenarioMode, ScopeType,
+        AllocationWorksheetLineInput, AllocationWorksheetResult, CalculateAllocationWorksheetInput,
+        DriftReport, NewAllocationTarget, NewAllocationTargetWeight, SaveAllocationTargetResult,
+        ScopeType, WorksheetCashInput,
     },
     portfolios::AccountScope,
 };
@@ -232,18 +232,18 @@ pub async fn get_allocation_target_drift(
     }
 }
 
-// ── Rebalance ─────────────────────────────────────────────────────────────────
+// ── Allocation worksheet ──────────────────────────────────────────────────────
 
-fn resolve_rebalance_input(
+fn resolve_worksheet_input(
     state: &Arc<ServiceContext>,
     target_id: String,
-    available_cash: Decimal,
-    scenario_mode: ScenarioMode,
+    cash: WorksheetCashInput,
+    lines: Vec<AllocationWorksheetLineInput>,
     filter: AccountScopeInput,
-) -> Result<CalculateRebalancePlanInput, String> {
+) -> Result<CalculateAllocationWorksheetInput, String> {
     let filter = filter.into_account_filter()?;
     let base_currency = state.get_base_currency();
-    let resolved =
+    let requested =
         wealthfolio_core::portfolios::PortfolioServiceTrait::resolve_account_scope_for_purpose(
             state.portfolio_service.as_ref(),
             &filter,
@@ -251,34 +251,49 @@ fn resolve_rebalance_input(
             AccountPurpose::Holdings,
         )
         .map_err(|e| e.to_string())?;
-    Ok(CalculateRebalancePlanInput {
+    let target = state
+        .allocation_target_service()
+        .get_target(&target_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("AllocationTarget {target_id} not found"))?;
+    let target_filter = account_scope_for_target(&target)?;
+    let resolved =
+        wealthfolio_core::portfolios::PortfolioServiceTrait::resolve_account_scope_for_purpose(
+            state.portfolio_service.as_ref(),
+            &target_filter,
+            &base_currency,
+            AccountPurpose::Holdings,
+        )
+        .map_err(|e| e.to_string())?;
+    let mut requested_ids = requested.account_ids;
+    let mut target_ids = resolved.account_ids.clone();
+    requested_ids.sort();
+    target_ids.sort();
+    if requested_ids != target_ids {
+        return Err("Worksheet page scope does not match the selected target scope".to_string());
+    }
+    Ok(CalculateAllocationWorksheetInput {
         target_id,
-        available_cash,
+        cash,
+        lines,
         account_ids: resolved.account_ids,
         base_currency,
         aggregated_account_id: resolved.scope_id,
-        scenario_mode,
     })
 }
 
 #[tauri::command]
-pub async fn calculate_rebalance_plan(
+pub async fn calculate_allocation_worksheet(
     state: State<'_, Arc<ServiceContext>>,
     target_id: String,
-    available_cash: Decimal,
-    scenario_mode: Option<ScenarioMode>,
+    cash: WorksheetCashInput,
+    lines: Vec<AllocationWorksheetLineInput>,
     filter: AccountScopeInput,
-) -> Result<RebalancePlan, String> {
-    let input = resolve_rebalance_input(
-        &state,
-        target_id,
-        available_cash,
-        scenario_mode.unwrap_or_default(),
-        filter,
-    )?;
+) -> Result<AllocationWorksheetResult, String> {
+    let input = resolve_worksheet_input(&state, target_id, cash, lines, filter)?;
     state
-        .rebalance_service()
-        .calculate_plan(input)
+        .allocation_worksheet_service()
+        .calculate_worksheet(input)
         .await
         .map_err(|e| e.to_string())
 }

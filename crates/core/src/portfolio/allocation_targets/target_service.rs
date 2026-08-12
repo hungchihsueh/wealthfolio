@@ -9,8 +9,7 @@ use crate::taxonomies::{Category, TaxonomyServiceTrait};
 
 use super::model::{
     AllocationTarget, AllocationTargetConstraint, AllocationTargetWeight, BandType,
-    ConstraintAction, ConstraintEffect, ConstraintSubjectType, NewAllocationTarget,
-    NewAllocationTargetWeight, RebalanceGoal, SaveAllocationTargetResult,
+    NewAllocationTarget, NewAllocationTargetWeight, RebalanceGoal, SaveAllocationTargetResult,
 };
 use super::validation::{validate_new_target, validate_weights_sum};
 
@@ -122,30 +121,10 @@ impl AllocationTargetService {
         )))
     }
 
-    fn validate_v1_sell_protection_constraint(
-        constraint: &AllocationTargetConstraint,
-    ) -> CoreResult<()> {
+    fn validate_worksheet_constraint(constraint: &AllocationTargetConstraint) -> CoreResult<()> {
         if constraint.subject_id.trim().is_empty() {
             return Err(CoreError::Validation(ValidationError::InvalidInput(
-                "sell protection subject_id is required".to_string(),
-            )));
-        }
-        if !matches!(
-            constraint.subject_type,
-            ConstraintSubjectType::Asset | ConstraintSubjectType::Account
-        ) {
-            return Err(CoreError::Validation(ValidationError::InvalidInput(
-                "sell protection supports asset and account subjects only".to_string(),
-            )));
-        }
-        if !matches!(constraint.action, ConstraintAction::Sell) {
-            return Err(CoreError::Validation(ValidationError::InvalidInput(
-                "sell protection supports sell action only".to_string(),
-            )));
-        }
-        if !matches!(constraint.effect, ConstraintEffect::Block) {
-            return Err(CoreError::Validation(ValidationError::InvalidInput(
-                "sell protection supports block effect only".to_string(),
+                "worksheet constraint subject_id is required".to_string(),
             )));
         }
         Ok(())
@@ -495,7 +474,7 @@ impl AllocationTargetServiceTrait for AllocationTargetService {
         let constraints = constraints
             .into_iter()
             .map(|mut constraint| {
-                Self::validate_v1_sell_protection_constraint(&constraint)?;
+                Self::validate_worksheet_constraint(&constraint)?;
                 constraint.target_id = target_id.to_string();
                 Ok(constraint)
             })
@@ -971,7 +950,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_target_constraints_rejects_non_v1_constraint_shape() {
+    async fn save_target_constraints_accepts_block_and_avoid_for_all_line_subjects() {
         let service = AllocationTargetService::new(
             Arc::new(MockAllocationTargetRepository {
                 target: target("asset_classes"),
@@ -1003,16 +982,37 @@ mod tests {
             ),
         ];
 
-        for invalid in cases {
-            let err = service
-                .save_target_constraints("target-1", vec![invalid])
+        for supported in cases {
+            let saved = service
+                .save_target_constraints("target-1", vec![supported])
                 .await
-                .unwrap_err();
-            assert!(
-                err.to_string().contains("sell protection"),
-                "unexpected error: {err}"
-            );
+                .unwrap();
+            assert_eq!(saved.len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn save_target_constraints_rejects_empty_subject() {
+        let service = AllocationTargetService::new(
+            Arc::new(MockAllocationTargetRepository {
+                target: target("asset_classes"),
+                weights: vec![],
+            }),
+            Arc::new(MockTaxonomyService),
+        );
+        let mut invalid = constraint(
+            ConstraintSubjectType::Asset,
+            ConstraintAction::Buy,
+            ConstraintEffect::Avoid,
+        );
+        invalid.subject_id = " ".to_string();
+
+        let error = service
+            .save_target_constraints("target-1", vec![invalid])
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("subject_id is required"));
     }
 
     #[tokio::test]

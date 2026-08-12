@@ -89,7 +89,7 @@ function flattenTree(nodes: CategoryNode[]): CategoryNode[] {
 
 function parseWeightInput(value: string): number | null {
   const num = parseFloat(value.replace("%", ""));
-  if (isNaN(num) || num < 0 || num > 100) return null;
+  if (isNaN(num) || num <= 0 || num > 100) return null;
   return Math.round(num * 100);
 }
 
@@ -147,18 +147,22 @@ export function MultiSelectTaxonomy({
   const totalWeight = useMemo(() => {
     return assignments.reduce((sum, a) => sum + a.weight, 0) / 100;
   }, [assignments]);
+  const remainingWeight = Math.max(0, 100 - totalWeight);
 
   const handleSelectCategory = (category: CategoryNode) => {
-    if (assignedCategoryIds.has(category.id) || isPending) return;
-    setPendingCategory({ category, weight: "100" });
+    if (assignedCategoryIds.has(category.id) || isPending || remainingWeight <= 0) return;
+    setPendingCategory({ category, weight: basisPointsToPercent(remainingWeight * 100) });
   };
 
   const handleConfirmCategory = async () => {
     if (!pendingCategory || isPending) return;
 
     const weight = parseWeightInput(pendingCategory.weight);
-    if (weight === null) {
-      setPendingCategory({ ...pendingCategory, weight: "100" });
+    if (weight === null || weight > Math.round(remainingWeight * 100)) {
+      setPendingCategory({
+        ...pendingCategory,
+        weight: basisPointsToPercent(Math.round(remainingWeight * 100)),
+      });
       return;
     }
 
@@ -257,7 +261,7 @@ export function MultiSelectTaxonomy({
               <button
                 type="button"
                 className="text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs transition-colors"
-                disabled={isPending}
+                disabled={isPending || remainingWeight <= 0}
               >
                 <Icons.Plus className="h-3.5 w-3.5" />
                 {t("asset:classification.add")}
