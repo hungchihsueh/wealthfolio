@@ -355,7 +355,7 @@ export function useActivityColumns({
         header: t("activity:datagrid.column.quantity"),
         size: 120,
         enableSorting: false,
-        meta: { cell: { variant: "number", step: 0.000001, valueType: "string" } },
+        meta: { cell: { variant: "number", min: 0, step: 0.000001, valueType: "string" } },
       },
       // 9. Price
       {
@@ -365,7 +365,7 @@ export function useActivityColumns({
         enableSorting: false,
         meta: {
           helpText: t("activity:datagrid.unit_price_help"),
-          cell: { variant: "number", step: 0.000001, valueType: "string" },
+          cell: { variant: "number", min: 0, step: 0.000001, valueType: "string" },
         },
       },
       // 10. Amount (most important money column)
@@ -374,7 +374,10 @@ export function useActivityColumns({
         header: t("activity:datagrid.column.amount"),
         size: 120,
         enableSorting: false,
-        meta: { cell: { variant: "number", step: 0.000001, valueType: "string" } },
+        meta: {
+          helpText: t("activity:datagrid.amount_help"),
+          cell: { variant: "number", min: 0, step: 0.000001, valueType: "string" },
+        },
       },
       // 11. Currency
       {
@@ -390,7 +393,7 @@ export function useActivityColumns({
         header: t("activity:datagrid.column.fee"),
         size: 100,
         enableSorting: false,
-        meta: { cell: { variant: "number", step: 0.000001, valueType: "string" } },
+        meta: { cell: { variant: "number", min: 0, step: 0.000001, valueType: "string" } },
       },
       // 13. Tax
       {
@@ -398,7 +401,7 @@ export function useActivityColumns({
         header: t("activity:datagrid.column.tax"),
         size: 100,
         enableSorting: false,
-        meta: { cell: { variant: "number", step: 0.000001, valueType: "string" } },
+        meta: { cell: { variant: "number", min: 0, step: 0.000001, valueType: "string" } },
       },
       // 14. FX Rate (lowest priority; often hidden)
       {
@@ -406,7 +409,7 @@ export function useActivityColumns({
         header: t("activity:datagrid.column.fx_rate"),
         size: 100,
         enableSorting: false,
-        meta: { cell: { variant: "number", step: 0.000001, valueType: "string" } },
+        meta: { cell: { variant: "number", min: 0, step: 0.000001, valueType: "string" } },
       },
 
       // === Notes + actions ===
