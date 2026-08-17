@@ -23,11 +23,13 @@ use wealthfolio_core::activities::{
 };
 use wealthfolio_core::assets::{Asset, InstrumentType};
 use wealthfolio_core::limits::ContributionActivity;
+use wealthfolio_core::quotes::store::QuoteStore;
 use wealthfolio_core::{Error, Result};
 
 use super::model::{ActivityDB, ActivityDetailsDB, ImportAccountTemplateDB, ImportTemplateDB};
 use crate::db::{get_connection, WriteHandle};
 use crate::errors::StorageError;
+use crate::market_data::MarketDataRepository;
 use crate::schema::{
     accounts, activities, assets, import_account_templates, import_runs, import_templates,
     spending_activity_splits,
@@ -42,7 +44,6 @@ use crate::sync::should_sync_outbox_for_activity;
 use crate::utils::chunk_for_sqlite;
 use async_trait::async_trait;
 use diesel::dsl::{max, min, sql};
-use num_traits::Zero;
 
 /// Repository for managing activity data in the database
 pub struct ActivityRepository {
@@ -401,6 +402,19 @@ impl ActivityRepository {
 
     fn naive_date_start_utc(date: NaiveDate) -> DateTime<Utc> {
         DateTime::from_naive_utc_and_offset(date.and_time(NaiveTime::MIN), Utc)
+    }
+
+    fn parse_activity_instant_utc(value: &str) -> Option<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(value)
+            .map(|dt| dt.with_timezone(&Utc))
+            .or_else(|_| {
+                NaiveDate::parse_from_str(value, "%Y-%m-%d").map(|date| {
+                    date.and_hms_opt(0, 0, 0)
+                        .expect("midnight is always valid")
+                        .and_utc()
+                })
+            })
+            .ok()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2088,6 +2102,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
                 activities::account_id,
                 activities::activity_type,
                 activities::activity_date,
+                activities::asset_id,
                 activities::amount,
                 activities::quantity,
                 activities::unit_price,
@@ -2102,11 +2117,59 @@ impl ActivityRepositoryTrait for ActivityRepository {
                 Option<String>,
                 Option<String>,
                 Option<String>,
+                Option<String>,
                 String,
                 Option<String>,
                 Option<String>,
             )>(&mut conn)
             .map_err(ActivityError::from)?;
+
+        let quote_requests: Vec<(String, NaiveDate)> = results
+            .iter()
+            .filter_map(
+                |(_, activity_type, activity_date, asset_id, amount, _, _, _, _, _)| {
+                    if activity_type != ACTIVITY_TYPE_TRANSFER_IN || amount.is_some() {
+                        return None;
+                    }
+                    let asset_id = asset_id
+                        .as_deref()
+                        .filter(|asset_id| !is_cash_symbol(asset_id))?;
+                    let activity_date =
+                        Self::parse_activity_instant_utc(activity_date)?.date_naive();
+                    Some((asset_id.to_string(), activity_date))
+                },
+            )
+            .collect();
+        let quotes_by_request = MarketDataRepository::new(self.pool.clone(), self.writer.clone())
+            .get_latest_quotes_for_asset_dates(&quote_requests)?;
+        let requested_asset_ids: Vec<String> = quote_requests
+            .iter()
+            .map(|(asset_id, _)| asset_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let multiplier_by_asset: HashMap<String, Decimal> = if requested_asset_ids.is_empty() {
+            HashMap::new()
+        } else {
+            assets::table
+                .filter(assets::id.eq_any(&requested_asset_ids))
+                .select((assets::id, assets::instrument_type, assets::metadata))
+                .load::<(String, Option<String>, Option<String>)>(&mut conn)
+                .map_err(StorageError::from)?
+                .into_iter()
+                .map(|(id, instrument_type, metadata)| {
+                    let multiplier = Asset {
+                        instrument_type: instrument_type
+                            .as_deref()
+                            .and_then(InstrumentType::from_db_str),
+                        metadata: metadata.and_then(|raw| serde_json::from_str(&raw).ok()),
+                        ..Default::default()
+                    }
+                    .contract_multiplier();
+                    (id, multiplier)
+                })
+                .collect()
+        };
 
         // Convert to ContributionActivity structs
         let activities = results
@@ -2116,6 +2179,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
                     account_id,
                     activity_type,
                     activity_date_str,
+                    asset_id,
                     amount_str,
                     quantity_str,
                     unit_price_str,
@@ -2123,30 +2187,43 @@ impl ActivityRepositoryTrait for ActivityRepository {
                     metadata,
                     source_group_id,
                 )| {
-                    // Parse activity instant as UTC; fallback date-only values to UTC midnight.
-                    let activity_instant = chrono::DateTime::parse_from_rfc3339(&activity_date_str)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .or_else(|_| {
-                            NaiveDate::parse_from_str(&activity_date_str, "%Y-%m-%d").map(|date| {
-                                date.and_hms_opt(0, 0, 0)
-                                    .expect("midnight is always valid")
-                                    .and_utc()
-                            })
-                        })
-                        .ok()?;
+                    let activity_instant = Self::parse_activity_instant_utc(&activity_date_str)?;
 
-                    let amount = match amount_str {
-                        Some(amount) => Decimal::from_str(&amount).ok(),
+                    let (amount, currency) = match amount_str {
+                        Some(amount) => (Decimal::from_str(&amount).ok(), currency),
                         None if activity_type == ACTIVITY_TYPE_TRANSFER_IN => {
                             let quantity =
                                 quantity_str.and_then(|value| Decimal::from_str(&value).ok());
-                            let unit_price =
-                                unit_price_str.and_then(|value| Decimal::from_str(&value).ok());
-                            quantity
-                                .zip(unit_price)
-                                .map(|(quantity, price)| quantity * price)
+                            if let Some(asset_id) = asset_id
+                                .as_deref()
+                                .filter(|asset_id| !is_cash_symbol(asset_id))
+                            {
+                                let request = (asset_id.to_string(), activity_instant.date_naive());
+                                let quote = quotes_by_request.get(&request);
+                                let multiplier = multiplier_by_asset
+                                    .get(asset_id)
+                                    .copied()
+                                    .unwrap_or(Decimal::ONE);
+                                (
+                                    quantity.zip(quote).map(|(quantity, quote)| {
+                                        quantity.abs() * quote.close.abs() * multiplier
+                                    }),
+                                    quote
+                                        .map(|quote| quote.currency.clone())
+                                        .unwrap_or(currency),
+                                )
+                            } else {
+                                let unit_price =
+                                    unit_price_str.and_then(|value| Decimal::from_str(&value).ok());
+                                (
+                                    quantity
+                                        .zip(unit_price)
+                                        .map(|(quantity, price)| quantity.abs() * price.abs()),
+                                    currency,
+                                )
+                            }
                         }
-                        None => None,
+                        None => (None, currency),
                     };
 
                     Some(ContributionActivity {
@@ -2171,12 +2248,10 @@ impl ActivityRepositoryTrait for ActivityRepository {
     ) -> Result<Vec<IncomeData>> {
         let mut conn = get_connection(&self.pool)?;
 
-        // For income reporting, we need to handle different subtypes:
-        // - Regular DIVIDEND/INTEREST: report gross income (`amount` is the
-        //   final credit, so add withholding tax and fees back)
-        // - Valid asset-backed income pairs: if amount is 0, calculate from:
-        //   1. quantity * unit_price (if unit_price is available)
-        //   2. quantity * market_price from quotes table (fallback)
+        // Regular income reports gross income: the stored amount is the final
+        // credit, so fees and withholding tax are added back. Asset-backed
+        // income without an amount is valued from units and the reported price,
+        // or from the latest quote on or before the activity date.
         // IDs are internal UUIDs — safe to interpolate directly; escape single quotes defensively.
         let account_filter = match account_ids {
             Some(ids) if !ids.is_empty() => {
@@ -2192,8 +2267,10 @@ impl ActivityRepositoryTrait for ActivityRepository {
 
         let query = format!(
             "SELECT strftime('%Y-%m', a.activity_date) as date,
+             a.activity_date,
              a.activity_type as income_type,
              COALESCE(a.asset_id, 'CASH') as asset_id,
+             a.asset_id as source_asset_id,
              COALESCE(ast.kind, 'CASH') as asset_kind,
              COALESCE(ast.display_code, 'CASH') as symbol,
              COALESCE(ast.name, 'Cash') as symbol_name,
@@ -2201,31 +2278,17 @@ impl ActivityRepositoryTrait for ActivityRepository {
              a.account_id,
              acc.name as account_name,
              acc.account_type,
-             CASE
-                 WHEN (
-                       (a.activity_type = 'INTEREST' AND UPPER(a.subtype) = 'STAKING_REWARD')
-                       OR (a.activity_type = 'DIVIDEND' AND UPPER(a.subtype) IN ('DRIP', 'DIVIDEND_IN_KIND'))
-                      )
-                      AND (a.amount IS NULL OR CAST(a.amount AS REAL) = 0)
-                 THEN CASE
-                     WHEN a.unit_price IS NOT NULL AND CAST(a.unit_price AS REAL) > 0
-                     THEN CAST(CAST(a.quantity AS REAL) * CAST(a.unit_price AS REAL) AS TEXT)
-                     WHEN q.close IS NOT NULL
-                     THEN CAST(CAST(a.quantity AS REAL) * CAST(q.close AS REAL) AS TEXT)
-                     ELSE '0'
-                 END
-                 ELSE CAST(
-                     COALESCE(CAST(a.amount AS REAL), 0)
-                     + COALESCE(CAST(a.fee AS REAL), 0)
-                     + COALESCE(CAST(a.tax AS REAL), 0)
-                     AS TEXT
-                 )
-             END as amount
+             a.subtype,
+             a.amount,
+             a.quantity,
+             a.unit_price,
+             a.fee,
+             a.tax,
+             ast.instrument_type,
+             ast.metadata as asset_metadata
              FROM activities a
              LEFT JOIN assets ast ON a.asset_id = ast.id
              INNER JOIN accounts acc ON a.account_id = acc.id
-             LEFT JOIN quotes q ON a.asset_id = q.asset_id
-                 AND date(a.activity_date) = q.day
              WHERE a.activity_type IN ('DIVIDEND', 'INTEREST', 'OTHER_INCOME')
              AND acc.is_archived = 0
              {account_filter}
@@ -2238,9 +2301,13 @@ impl ActivityRepositoryTrait for ActivityRepository {
             #[diesel(sql_type = diesel::sql_types::Text)]
             pub date: String,
             #[diesel(sql_type = diesel::sql_types::Text)]
+            pub activity_date: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
             pub income_type: String,
             #[diesel(sql_type = diesel::sql_types::Text)]
             pub asset_id: String,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            pub source_asset_id: Option<String>,
             #[diesel(sql_type = diesel::sql_types::Text)]
             pub asset_kind: String,
             #[diesel(sql_type = diesel::sql_types::Text)]
@@ -2255,13 +2322,55 @@ impl ActivityRepositoryTrait for ActivityRepository {
             pub account_name: String,
             #[diesel(sql_type = diesel::sql_types::Text)]
             pub account_type: String,
-            #[diesel(sql_type = diesel::sql_types::Text)]
-            pub amount: String,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            pub subtype: Option<String>,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            pub amount: Option<String>,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            pub quantity: Option<String>,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            pub unit_price: Option<String>,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            pub fee: Option<String>,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            pub tax: Option<String>,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            pub instrument_type: Option<String>,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            pub asset_metadata: Option<String>,
         }
 
         let raw_results = diesel::sql_query(&query)
             .load::<RawIncomeData>(&mut conn)
             .map_err(ActivityError::from)?;
+
+        let is_asset_backed = |income_type: &str, subtype: Option<&str>| {
+            let subtype = subtype.unwrap_or_default();
+            (income_type == "INTEREST" && subtype.eq_ignore_ascii_case("STAKING_REWARD"))
+                || (income_type == "DIVIDEND"
+                    && (subtype.eq_ignore_ascii_case("DRIP")
+                        || subtype.eq_ignore_ascii_case("DIVIDEND_IN_KIND")))
+        };
+        let parse_decimal = |value: Option<&str>| {
+            value
+                .and_then(|value| Decimal::from_str(value).ok())
+                .unwrap_or(Decimal::ZERO)
+        };
+        let quote_requests: Vec<(String, NaiveDate)> = raw_results
+            .iter()
+            .filter(|raw| {
+                is_asset_backed(&raw.income_type, raw.subtype.as_deref())
+                    && parse_decimal(raw.amount.as_deref()).is_zero()
+                    && parse_decimal(raw.unit_price.as_deref()) <= Decimal::ZERO
+            })
+            .filter_map(|raw| {
+                let asset_id = raw.source_asset_id.as_ref()?;
+                let date = Self::parse_activity_instant_utc(&raw.activity_date)?.date_naive();
+                Some((asset_id.clone(), date))
+            })
+            .collect();
+        let quotes_by_request = MarketDataRepository::new(self.pool.clone(), self.writer.clone())
+            .get_latest_quotes_for_asset_dates(&quote_requests)?;
 
         // Transform raw results into IncomeData
         let results = raw_results
@@ -2270,21 +2379,62 @@ impl ActivityRepositoryTrait for ActivityRepository {
                 if !account_supports_purpose(&raw.account_type, AccountPurpose::Income) {
                     return None;
                 }
-                let amount = Decimal::from_str(&raw.amount).unwrap_or_else(|_| Decimal::zero());
-                Some(Ok(IncomeData {
+                let stored_amount = parse_decimal(raw.amount.as_deref()).abs();
+                let fee = parse_decimal(raw.fee.as_deref()).abs();
+                let tax = parse_decimal(raw.tax.as_deref()).abs();
+                let asset_backed = is_asset_backed(&raw.income_type, raw.subtype.as_deref());
+                let mut currency = raw.currency;
+                let amount = if asset_backed && stored_amount.is_zero() {
+                    let quantity = parse_decimal(raw.quantity.as_deref()).abs();
+                    let reported_price = parse_decimal(raw.unit_price.as_deref()).abs();
+                    let request_date = Self::parse_activity_instant_utc(&raw.activity_date)
+                        .map(|instant| instant.date_naive());
+                    let quote = raw.source_asset_id.as_ref().and_then(|asset_id| {
+                        request_date
+                            .and_then(|date| quotes_by_request.get(&(asset_id.clone(), date)))
+                    });
+                    let price = if reported_price > Decimal::ZERO {
+                        reported_price
+                    } else {
+                        quote
+                            .map(|quote| quote.close.abs())
+                            .unwrap_or(Decimal::ZERO)
+                    };
+                    if reported_price.is_zero() {
+                        if let Some(quote) = quote {
+                            currency = quote.currency.clone();
+                        }
+                    }
+                    let multiplier = Asset {
+                        instrument_type: raw
+                            .instrument_type
+                            .as_deref()
+                            .and_then(InstrumentType::from_db_str),
+                        metadata: raw
+                            .asset_metadata
+                            .as_deref()
+                            .and_then(|value| serde_json::from_str(value).ok()),
+                        ..Default::default()
+                    }
+                    .contract_multiplier();
+                    quantity * price * multiplier
+                } else {
+                    stored_amount + fee + tax
+                };
+                Some(IncomeData {
                     date: raw.date,
                     income_type: raw.income_type,
                     asset_id: raw.asset_id,
                     asset_kind: raw.asset_kind,
                     symbol: raw.symbol,
                     symbol_name: raw.symbol_name,
-                    currency: raw.currency,
+                    currency,
                     amount,
                     account_id: raw.account_id,
                     account_name: raw.account_name,
-                }))
+                })
             })
-            .collect::<Result<Vec<IncomeData>>>()?; // Collect into Result
+            .collect();
 
         Ok(results)
     }
@@ -3160,24 +3310,54 @@ mod tests {
             .execute(&mut conn)
             .expect("set securities account type");
             diesel::sql_query(
+                "INSERT INTO assets
+                 (id, kind, name, display_code, metadata, is_active, quote_mode, quote_ccy,
+                  instrument_type, instrument_symbol, created_at, updated_at)
+                 VALUES
+                 ('contribution-equity', 'INVESTMENT', 'Contribution Equity', 'CEQ', NULL, 1,
+                  'MARKET', 'USD', 'EQUITY', 'CEQ', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                 ('contribution-option', 'INVESTMENT', 'Contribution Option', 'COPT',
+                  '{\"contractMultiplier\":10}', 1, 'MARKET', 'USD', 'OPTION', 'COPT',
+                  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            )
+            .execute(&mut conn)
+            .expect("insert contribution assets");
+            diesel::sql_query(
+                "INSERT INTO quotes
+                 (id, asset_id, day, source, close, currency, created_at, timestamp)
+                 VALUES
+                 ('contribution-equity-quote', 'contribution-equity', '2025-06-13', 'YAHOO',
+                  '40', 'USD', CURRENT_TIMESTAMP, '2025-06-13T16:00:00Z'),
+                 ('contribution-option-quote', 'contribution-option', '2025-06-15', 'YAHOO',
+                  '6', 'USD', CURRENT_TIMESTAMP, '2025-06-15T16:00:00Z')",
+            )
+            .execute(&mut conn)
+            .expect("insert transfer-date quotes");
+            diesel::sql_query(
                 "INSERT INTO activities
-                 (id, account_id, activity_type, status, activity_date, quantity, unit_price,
+                 (id, account_id, asset_id, activity_type, status, activity_date, quantity, unit_price,
                   amount, currency, metadata, source_system, is_user_modified, needs_review,
                   created_at, updated_at)
                  VALUES
-                 ('external-transfer-in', 'registered-account', 'TRANSFER_IN', 'POSTED',
+                 ('external-transfer-in', 'registered-account', 'contribution-equity',
+                  'TRANSFER_IN', 'POSTED',
                   '2025-06-15T12:00:00Z', '10', '25', NULL, 'USD',
                   '{\"flow\":{\"is_external\":true}}', 'MANUAL', 0, 0,
                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-                 ('internal-transfer-out', 'registered-account', 'TRANSFER_OUT', 'POSTED',
+                 ('external-option-transfer-in', 'registered-account', 'contribution-option',
+                  'TRANSFER_IN', 'POSTED',
+                  '2025-06-15T12:00:00Z', '1', '5', NULL, 'USD',
+                  '{\"flow\":{\"is_external\":true}}', 'MANUAL', 0, 0,
+                  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                 ('internal-transfer-out', 'registered-account', NULL, 'TRANSFER_OUT', 'POSTED',
                   '2025-07-15T12:00:00Z', '5', '20', NULL, 'USD',
                   '{\"flow\":{\"is_external\":true}}',
                   'MANUAL', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-                 ('internal-transfer-in', 'second-registered-account', 'TRANSFER_IN', 'POSTED',
+                 ('internal-transfer-in', 'second-registered-account', NULL, 'TRANSFER_IN', 'POSTED',
                   '2025-07-15T12:00:00Z', '5', '20', NULL, 'USD',
                   '{\"flow\":{\"is_external\":true}}',
                   'MANUAL', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-                 ('unflagged-transfer-in', 'second-registered-account', 'TRANSFER_IN', 'POSTED',
+                 ('unflagged-transfer-in', 'second-registered-account', NULL, 'TRANSFER_IN', 'POSTED',
                   '2025-08-15T12:00:00Z', '4', '25', NULL, 'USD', NULL, 'MANUAL', 0, 0,
                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
             )
@@ -3214,14 +3394,65 @@ mod tests {
             .calculate_deposits_for_contribution_limit("registered-limit", "USD")
             .expect("calculate deposits");
 
-        assert_eq!(deposits.total, Decimal::from(250));
+        // Equity uses transfer-date FMV (10 × 40), not book basis (10 × 25).
+        // The mini option also applies its canonical multiplier (1 × 6 × 10).
+        assert_eq!(deposits.total, Decimal::from(460));
         assert_eq!(
             deposits.by_account["registered-account"].amount,
-            Decimal::from(250)
+            Decimal::from(460)
         );
         assert!(!deposits
             .by_account
             .contains_key("second-registered-account"));
+    }
+
+    #[tokio::test]
+    async fn contribution_activity_does_not_fall_back_to_security_book_basis() {
+        let (pool, writer) = setup_db();
+        let repo = ActivityRepository::new(pool.clone(), writer);
+        let mut conn = get_connection(&pool).expect("conn");
+        insert_account(&mut conn, "registered-no-quote");
+        diesel::update(accounts::table.filter(accounts::id.eq("registered-no-quote")))
+            .set(accounts::account_type.eq("SECURITIES"))
+            .execute(&mut conn)
+            .expect("set account type");
+        diesel::sql_query(
+            "INSERT INTO assets
+             (id, kind, name, display_code, metadata, is_active, quote_mode, quote_ccy,
+              instrument_type, instrument_symbol, created_at, updated_at)
+             VALUES ('no-quote-equity', 'INVESTMENT', 'No Quote Equity', 'NQE', NULL, 1,
+                     'MARKET', 'USD', 'EQUITY', 'NQE', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .execute(&mut conn)
+        .expect("insert asset");
+        diesel::sql_query(
+            "INSERT INTO activities
+             (id, account_id, asset_id, activity_type, status, activity_date, quantity,
+              unit_price, amount, currency, metadata, source_system, is_user_modified,
+              needs_review, created_at, updated_at)
+             VALUES ('no-quote-transfer', 'registered-no-quote', 'no-quote-equity',
+                     'TRANSFER_IN', 'POSTED', '2025-06-15T12:00:00Z', '10', '25', NULL,
+                     'USD', '{\"flow\":{\"is_external\":true}}', 'MANUAL', 0, 0,
+                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .execute(&mut conn)
+        .expect("insert transfer");
+        drop(conn);
+
+        let rows = repo
+            .get_contribution_activities(
+                &[String::from("registered-no-quote")],
+                DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            )
+            .expect("contribution activities");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].amount, None);
     }
 
     fn insert_holdings_snapshot(
@@ -4110,6 +4341,132 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].amount, Decimal::new(100, 0));
+    }
+
+    #[tokio::test]
+    async fn income_report_preserves_decimal_precision() {
+        let (pool, writer) = setup_db();
+        let repo = ActivityRepository::new(pool.clone(), writer);
+        let mut conn = get_connection(&pool).expect("conn");
+
+        insert_account(&mut conn, "acc-precise-income");
+        insert_activity_with_subtype(
+            &mut conn,
+            "precise-dividend",
+            "acc-precise-income",
+            "DIVIDEND",
+            None,
+            None,
+        );
+        diesel::sql_query(
+            "UPDATE activities
+             SET amount = '9007199254740993.01', fee = '0.01', tax = '0.02'
+             WHERE id = 'precise-dividend'",
+        )
+        .execute(&mut conn)
+        .expect("set precise income values");
+
+        let rows = repo
+            .get_income_activities_data(Some(&[String::from("acc-precise-income")]))
+            .expect("income data");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].amount,
+            Decimal::from_str("9007199254740993.04").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn income_report_applies_asset_multiplier_to_derived_income() {
+        let (pool, writer) = setup_db();
+        let repo = ActivityRepository::new(pool.clone(), writer);
+        let mut conn = get_connection(&pool).expect("conn");
+
+        insert_account(&mut conn, "acc-multiplied-income");
+        diesel::sql_query(
+            "INSERT INTO assets
+             (id, kind, name, display_code, metadata, is_active, quote_mode, quote_ccy,
+              instrument_type, instrument_symbol, created_at, updated_at)
+             VALUES ('income-mini-option', 'INVESTMENT', 'Income Mini Option', 'IMINI',
+                     '{\"contractMultiplier\":10}', 1, 'MARKET', 'USD', 'OPTION', 'IMINI',
+                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .execute(&mut conn)
+        .expect("insert income asset");
+        insert_activity_with_subtype(
+            &mut conn,
+            "option-staking",
+            "acc-multiplied-income",
+            "INTEREST",
+            Some("income-mini-option"),
+            Some("STAKING_REWARD"),
+        );
+        diesel::sql_query(
+            "UPDATE activities SET amount = '0', quantity = '2', unit_price = '3'
+             WHERE id = 'option-staking'",
+        )
+        .execute(&mut conn)
+        .expect("set option income values");
+
+        let rows = repo
+            .get_income_activities_data(Some(&[String::from("acc-multiplied-income")]))
+            .expect("income data");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].amount, Decimal::from(60));
+    }
+
+    #[tokio::test]
+    async fn income_report_uses_latest_prior_quote_for_asset_backed_income() {
+        let (pool, writer) = setup_db();
+        let repo = ActivityRepository::new(pool.clone(), writer);
+        let mut conn = get_connection(&pool).expect("conn");
+
+        insert_account(&mut conn, "acc-quoted-income");
+        diesel::sql_query(
+            "INSERT INTO assets
+             (id, kind, name, display_code, metadata, is_active, quote_mode, quote_ccy,
+              instrument_type, instrument_symbol, created_at, updated_at)
+             VALUES ('quoted-income-asset', 'INVESTMENT', 'Quoted Income Asset', 'QIA', NULL,
+                     1, 'MARKET', 'CAD', 'EQUITY', 'QIA', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .execute(&mut conn)
+        .expect("insert income asset");
+        insert_activity_with_subtype(
+            &mut conn,
+            "quoted-drip",
+            "acc-quoted-income",
+            "DIVIDEND",
+            Some("quoted-income-asset"),
+            Some("DRIP"),
+        );
+        diesel::sql_query(
+            "UPDATE activities
+             SET amount = '0', quantity = '2', unit_price = NULL, currency = 'USD'
+             WHERE id = 'quoted-drip'",
+        )
+        .execute(&mut conn)
+        .expect("set quote-derived income values");
+        diesel::sql_query(
+            "INSERT INTO quotes
+             (id, asset_id, day, source, close, currency, created_at, timestamp)
+             VALUES
+             ('prior-income-quote', 'quoted-income-asset', '2024-01-14', 'YAHOO',
+              '7', 'CAD', CURRENT_TIMESTAMP, '2024-01-14T16:00:00Z'),
+             ('future-income-quote', 'quoted-income-asset', '2024-01-16', 'YAHOO',
+              '99', 'CAD', CURRENT_TIMESTAMP, '2024-01-16T16:00:00Z')",
+        )
+        .execute(&mut conn)
+        .expect("insert surrounding income quotes");
+
+        let rows = repo
+            .get_income_activities_data(Some(&[String::from("acc-quoted-income")]))
+            .expect("income data");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].amount, Decimal::from(14));
+        assert_eq!(rows[0].currency, "CAD");
     }
 
     /// Regression: re-linking the same (account_id, context_kind, source_system) must preserve the row `id`
