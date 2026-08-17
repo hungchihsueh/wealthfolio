@@ -438,8 +438,10 @@ pub async fn initialize_context(
             .set_setting_value(ACTIVITY_CASH_AMOUNT_MIGRATION_KEY, "rebuild_pending")
             .await?;
         let migrated = activity_service.migrate_activity_cash_amounts().await?;
+        // Closed accounts remain in portfolio history until archived, so their
+        // derived snapshots must be rebuilt before this migration is complete.
         let account_ids: Vec<String> = account_service
-            .get_active_non_archived_accounts()?
+            .get_non_archived_accounts()?
             .into_iter()
             .map(|account| account.id)
             .collect();
