@@ -1,8 +1,9 @@
 import { useHoldings } from "@/hooks/use-holdings";
 import { useSettings } from "@/hooks/use-settings";
-import { ACTIVITY_SUBTYPES, ActivityType, QuoteMode } from "@/lib/constants";
+import { findAssetContractMultiplier } from "@/lib/activity-utils";
+import { ACTIVITY_SUBTYPES, ActivityType, DECIMAL_PRECISION, QuoteMode } from "@/lib/constants";
 import { buildOccSymbol } from "@/lib/occ-symbol";
-import { normalizeCurrency } from "@/lib/utils";
+import { normalizeCurrency, roundDecimal } from "@/lib/utils";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNumberFormatting } from "@wealthfolio/ui";
 import { Alert, AlertDescription } from "@wealthfolio/ui/components/ui/alert";
@@ -13,6 +14,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { FormProvider, useForm, type Resolver } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { z } from "zod";
+import { useAssets } from "@/pages/asset/hooks/use-assets";
 import {
   AccountSelect,
   AdvancedOptionsSection,
@@ -300,7 +302,7 @@ export function BuyForm({
       expirationDate: undefined,
       optionType: "CALL",
       contractMultiplier: 100,
-      assetContractMultiplier: 100,
+      assetContractMultiplier: 1,
       activityMetadata: undefined,
       ...defaultValues,
       currency: defaultValues?.currency?.trim() || initialCurrency,
@@ -308,8 +310,10 @@ export function BuyForm({
   });
 
   const { watch, setValue } = form;
+  const { assets } = useAssets();
   const accountId = watch("accountId");
   const assetId = watch("assetId");
+  const existingAssetId = watch("existingAssetId");
   const currency = watch("currency");
   const quoteMode = watch("quoteMode");
   const symbolQuoteCcy = watch("symbolQuoteCcy");
@@ -337,9 +341,13 @@ export function BuyForm({
       if (isStock && subtype === ACTIVITY_SUBTYPES.POSITION_CLOSE) {
         setValue("subtype", null);
       }
+      setValue(
+        "assetContractMultiplier",
+        assetType === "option" ? 100 : assetType === "bond" ? 0.01 : 1,
+      );
       prevAssetIdRef.current = assetId;
     }
-  }, [assetId, isStock, subtype, setValue]);
+  }, [assetId, assetType, isStock, subtype, setValue]);
   const optionSubmitLabel =
     subtype === ACTIVITY_SUBTYPES.POSITION_CLOSE
       ? t("activity:form.button_buy_to_close")
@@ -357,27 +365,38 @@ export function BuyForm({
   const optFee = watch("fee");
   const optTax = watch("tax");
   const optMultiplier = watch("contractMultiplier");
+  const storedAssetMultiplier = watch("assetContractMultiplier");
+  const assetMultiplier = useMemo(() => {
+    const matchedMultiplier = findAssetContractMultiplier(assets, [existingAssetId, assetId]);
+    if (matchedMultiplier) return matchedMultiplier;
+    const storedMultiplier = Number(storedAssetMultiplier);
+    if (Number.isFinite(storedMultiplier) && storedMultiplier > 0) return storedMultiplier;
+    return assetType === "bond" ? 0.01 : 1;
+  }, [assetId, assetType, assets, existingAssetId, storedAssetMultiplier]);
 
   const calculatedCashAmount = useMemo(() => {
     const q = Number(optQuantity) || 0;
     const p = Number(optUnitPrice) || 0;
-    const multiplier = isOption ? Number(optMultiplier) || 100 : assetType === "bond" ? 0.01 : 1;
+    const multiplier = isOption ? Number(optMultiplier) || 100 : assetMultiplier;
     return q > 0 && p > 0 ? q * p * multiplier + Number(optFee || 0) + Number(optTax || 0) : 0;
-  }, [assetType, isOption, optFee, optMultiplier, optQuantity, optTax, optUnitPrice]);
+  }, [assetMultiplier, isOption, optFee, optMultiplier, optQuantity, optTax, optUnitPrice]);
 
   const handleAssetTypeChange = (value: AssetType) => {
     if (value === "option") {
       setValue("quoteMode", QuoteMode.MARKET);
       setValue("assetKind", "OPTION");
+      setValue("assetContractMultiplier", 100);
       // No default position intent — the user must explicitly pick Open or Close.
       setValue("subtype", null);
     } else if (value === "bond") {
       setValue("quoteMode", QuoteMode.MARKET);
       setValue("assetKind", "BOND");
+      setValue("assetContractMultiplier", 0.01);
       setValue("subtype", null);
     } else {
       setValue("quoteMode", QuoteMode.MARKET);
       setValue("assetKind", undefined);
+      setValue("assetContractMultiplier", 1);
       setValue("subtype", null);
     }
     setValue("assetId", "");
@@ -469,6 +488,9 @@ export function BuyForm({
     // For bonds: set instrument type
     if (data.assetType === "bond") {
       data.symbolInstrumentType = data.symbolInstrumentType ?? "BOND";
+    }
+    if (data.amount == null && calculatedCashAmount > 0) {
+      data.amount = roundDecimal(calculatedCashAmount, DECIMAL_PRECISION);
     }
     await onSubmit(data);
   });
