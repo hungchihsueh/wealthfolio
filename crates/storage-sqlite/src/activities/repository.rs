@@ -2728,6 +2728,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
                             activities::activity_type.eq(excluded(activities::activity_type)),
                             activities::subtype.eq(excluded(activities::subtype)),
                             activities::activity_date.eq(excluded(activities::activity_date)),
+                            activities::settlement_date.eq(excluded(activities::settlement_date)),
                             activities::quantity.eq(excluded(activities::quantity)),
                             activities::unit_price.eq(excluded(activities::unit_price)),
                             activities::currency.eq(excluded(activities::currency)),
@@ -4847,7 +4848,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
-            settlement_date: None,
+            settlement_date: Some("2024-01-17".to_string()),
             quantity: Some(Decimal::ONE),
             unit_price: Some(Decimal::from(100)),
             currency: "USD".to_string(),
@@ -4873,7 +4874,7 @@ mod tests {
             activity_type: "BUY".to_string(),
             subtype: None,
             activity_date: "2024-01-15".to_string(),
-            settlement_date: None,
+            settlement_date: Some("2024-01-18".to_string()),
             quantity: Some(Decimal::ONE),
             unit_price: Some(Decimal::from(101)),
             currency: "USD".to_string(),
@@ -4913,6 +4914,7 @@ mod tests {
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
         )> = activities::table
             .filter(activities::account_id.eq("acc-sync"))
             .select((
@@ -4921,6 +4923,7 @@ mod tests {
                 activities::source_system,
                 activities::source_record_id,
                 activities::idempotency_key,
+                activities::settlement_date,
             ))
             .load(&mut conn)
             .expect("load synced activities");
@@ -4942,6 +4945,7 @@ mod tests {
         assert_eq!(rows[0].2.as_deref(), Some("SNAPTRADE"));
         assert_eq!(rows[0].3.as_deref(), Some("txn-1"));
         assert_eq!(rows[0].4.as_deref(), Some("idemp-2"));
+        assert_eq!(rows[0].5.as_deref(), Some("2024-01-18T00:00:00+00:00"));
     }
 
     #[tokio::test]
