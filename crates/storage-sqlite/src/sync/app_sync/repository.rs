@@ -441,6 +441,9 @@ fn apply_column_rename(table: &str, column: &str) -> Option<&'static str> {
 /// Old payloads may send pre-rename enum values (e.g., "ACTIVITY" → "CSV_ACTIVITY").
 fn apply_value_migration(table: &str, column: &str, value: serde_json::Value) -> serde_json::Value {
     match (table, column) {
+        ("activities", "amount" | "quantity" | "unit_price" | "fee" | "tax") => {
+            migrate_activity_magnitude_value(value)
+        }
         ("goals", "status_lifecycle") => migrate_legacy_goal_lifecycle_value(value),
         ("import_account_templates", "context_kind") => {
             if let Some(s) = value.as_str() {
@@ -458,6 +461,26 @@ fn apply_value_migration(table: &str, column: &str, value: serde_json::Value) ->
                 }
             }
             value
+        }
+        _ => value,
+    }
+}
+
+fn migrate_activity_magnitude_value(value: serde_json::Value) -> serde_json::Value {
+    let parse_decimal = |raw: &str| {
+        raw.parse::<Decimal>()
+            .or_else(|_| Decimal::from_scientific(raw))
+            .ok()
+    };
+    let decimal = match &value {
+        serde_json::Value::String(raw) => parse_decimal(raw),
+        serde_json::Value::Number(raw) => parse_decimal(&raw.to_string()),
+        _ => None,
+    };
+
+    match decimal {
+        Some(decimal) if decimal < Decimal::ZERO => {
+            serde_json::Value::String((-decimal).to_string())
         }
         _ => value,
     }
@@ -7699,6 +7722,71 @@ mod tests {
         let malicious = serde_json::Value::String("'; DROP TABLE accounts; --".to_string());
         let sql = json_value_to_sql_literal(&malicious);
         assert_eq!(sql, "'''; DROP TABLE accounts; --'");
+    }
+
+    #[tokio::test]
+    async fn replay_normalizes_signed_activity_magnitudes() {
+        let (pool, writer) = setup_db();
+        {
+            let mut conn = get_connection(&pool).expect("conn");
+            insert_account_for_test(&mut conn, "acc-signed-activity").expect("insert account");
+        }
+        let repo = AppSyncRepository::new(pool.clone(), writer);
+
+        let applied = repo
+            .apply_remote_event_lww(
+                SyncEntity::Activity,
+                "activity-signed".to_string(),
+                SyncOperation::Create,
+                "evt-signed-activity".to_string(),
+                "2026-02-15T00:00:00Z".to_string(),
+                1,
+                serde_json::json!({
+                    "id": "activity-signed",
+                    "accountId": "acc-signed-activity",
+                    "activityType": "BUY",
+                    "status": "POSTED",
+                    "activityDate": "2026-02-14",
+                    "quantity": "-2",
+                    "unitPrice": "-5.5",
+                    "amount": "-12",
+                    "fee": -0.5,
+                    "tax": "-2.5e-1",
+                    "currency": "USD",
+                    "isUserModified": 0,
+                    "needsReview": 0,
+                    "createdAt": "2026-02-15T00:00:00Z",
+                    "updatedAt": "2026-02-15T00:00:00Z"
+                }),
+            )
+            .await
+            .expect("apply signed activity");
+        assert!(applied);
+
+        let mut conn = get_connection(&pool).expect("conn");
+        let stored = activities::table
+            .find("activity-signed")
+            .select((
+                activities::quantity,
+                activities::unit_price,
+                activities::amount,
+                activities::fee,
+                activities::tax,
+            ))
+            .first::<(
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            )>(&mut conn)
+            .expect("load activity");
+
+        assert_eq!(stored.0.as_deref(), Some("2"));
+        assert_eq!(stored.1.as_deref(), Some("5.5"));
+        assert_eq!(stored.2.as_deref(), Some("12"));
+        assert_eq!(stored.3.as_deref(), Some("0.5"));
+        assert_eq!(stored.4.as_deref(), Some("0.25"));
     }
 
     #[tokio::test]
