@@ -99,7 +99,7 @@ pub struct ActivityDraft {
     pub asset_name: Option<String>,
     pub quantity: Option<f64>,
     pub unit_price: Option<f64>,
-    /// Computed or provided amount.
+    /// Provider- or user-supplied authoritative amount.
     pub amount: Option<f64>,
     pub fee: Option<f64>,
     pub tax: Option<f64>,
@@ -452,16 +452,9 @@ impl RecordActivity {
             "none"
         };
 
-        // 6. Compute amount if not provided
-        let amount = compute_amount(
-            args.quantity,
-            args.unit_price,
-            args.fee,
-            args.tax,
-            args.amount,
-        );
-
-        // 7. Build draft
+        // 6. Build draft. Preserve a supplied total as authoritative and leave
+        // missing totals for the activity resolver to derive with the asset's
+        // canonical multiplier and activity-specific charge rules.
         // Use asset's currency for trading activities, otherwise use account currency
         let draft_currency = resolved_asset
             .as_ref()
@@ -474,11 +467,11 @@ impl RecordActivity {
             symbol: args.symbol.clone(),
             asset_id,
             asset_name,
-            quantity: args.quantity,
-            unit_price: args.unit_price,
-            amount,
-            fee: args.fee,
-            tax: args.tax,
+            quantity: canonical_magnitude(args.quantity),
+            unit_price: canonical_magnitude(args.unit_price),
+            amount: canonical_magnitude(args.amount),
+            fee: canonical_magnitude(args.fee),
+            tax: canonical_magnitude(args.tax),
             currency: draft_currency,
             account_id,
             account_name,
@@ -490,10 +483,10 @@ impl RecordActivity {
             asset_kind: None,
         };
 
-        // 8. Validate the draft
+        // 7. Validate the draft
         let validation = validate_draft(&draft);
 
-        // 9. Get available subtypes
+        // 8. Get available subtypes
         let available_subtypes = get_subtypes_for_activity_type(&activity_type);
 
         Ok(RecordActivityOutput {
@@ -670,25 +663,8 @@ fn validate_draft(draft: &ActivityDraft) -> ValidationResult {
     }
 }
 
-/// Compute amount from quantity and unit_price if not provided.
-fn compute_amount(
-    quantity: Option<f64>,
-    unit_price: Option<f64>,
-    fee: Option<f64>,
-    tax: Option<f64>,
-    provided_amount: Option<f64>,
-) -> Option<f64> {
-    if let Some(amount) = provided_amount {
-        return Some(amount);
-    }
-
-    match (quantity, unit_price) {
-        (Some(qty), Some(price)) => {
-            let base = qty * price;
-            Some(base + fee.unwrap_or(0.0) + tax.unwrap_or(0.0))
-        }
-        _ => None,
-    }
+fn canonical_magnitude(value: Option<f64>) -> Option<f64> {
+    value.map(f64::abs)
 }
 
 #[async_trait::async_trait]
@@ -760,34 +736,10 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_amount() {
-        // With quantity and price
-        assert_eq!(
-            compute_amount(Some(10.0), Some(100.0), None, None, None),
-            Some(1000.0)
-        );
-
-        // With fee
-        assert_eq!(
-            compute_amount(Some(10.0), Some(100.0), Some(5.0), None, None),
-            Some(1005.0)
-        );
-
-        // With fee and tax
-        assert_eq!(
-            compute_amount(Some(10.0), Some(100.0), Some(5.0), Some(2.0), None),
-            Some(1007.0)
-        );
-
-        // Provided amount takes precedence
-        assert_eq!(
-            compute_amount(Some(10.0), Some(100.0), None, None, Some(500.0)),
-            Some(500.0)
-        );
-
-        // Missing quantity or price
-        assert_eq!(compute_amount(Some(10.0), None, None, None, None), None);
-        assert_eq!(compute_amount(None, Some(100.0), None, None, None), None);
+    fn canonical_magnitude_preserves_missing_values_and_normalizes_signs() {
+        assert_eq!(canonical_magnitude(None), None);
+        assert_eq!(canonical_magnitude(Some(-12.5)), Some(12.5));
+        assert_eq!(canonical_magnitude(Some(12.5)), Some(12.5));
     }
 
     #[test]
