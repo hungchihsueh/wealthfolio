@@ -47,6 +47,7 @@ interface RecordActivityArgs {
   unit_price?: number;
   amount?: number;
   fee?: number;
+  tax?: number;
   account?: string;
   subtype?: string;
   notes?: string;
@@ -62,6 +63,7 @@ interface ActivityDraft {
   unitPrice?: number;
   amount?: number;
   fee?: number;
+  tax?: number;
   currency: string;
   accountId?: string;
   accountName?: string;
@@ -264,6 +266,7 @@ function normalizeResult(result: unknown, fallbackCurrency: string): RecordActiv
     unitPrice: finiteNumberValue(draftRaw.unitPrice ?? draftRaw.unit_price),
     amount: finiteNumberValue(draftRaw.amount),
     fee: finiteNumberValue(draftRaw.fee),
+    tax: finiteNumberValue(draftRaw.tax),
     currency: (draftRaw.currency as string) ?? fallbackCurrency,
     accountId: (draftRaw.accountId as string) ?? (draftRaw.account_id as string) ?? undefined,
     accountName: (draftRaw.accountName as string) ?? (draftRaw.account_name as string) ?? undefined,
@@ -533,6 +536,7 @@ function draftToPseudoActivity(
     unitPrice: draft.unitPrice != null ? String(draft.unitPrice) : null,
     amount: draft.amount != null ? String(draft.amount) : null,
     fee: draft.fee != null ? String(draft.fee) : null,
+    tax: draft.tax != null ? String(draft.tax) : null,
     currency: draft.currency,
     comment: draft.notes,
     subtype: draft.subtype,
@@ -711,6 +715,9 @@ function DraftReview({
         {draft.fee !== undefined && (
           <ReviewField label={t("ai:recordActivity.fee")} value={formatAmount(draft.fee)} />
         )}
+        {draft.tax !== undefined && (
+          <ReviewField label={t("activity:form.label_tax")} value={formatAmount(draft.tax)} />
+        )}
         {draft.subtype && (
           <ReviewField
             label={t("ai:recordActivity.subtype")}
@@ -876,11 +883,7 @@ function DraftForm({
   const cardTitle = isEditing
     ? t("ai:recordActivity.editActivity", { type: activityTypeDisplay })
     : t("ai:recordActivity.reviewActivity", { type: activityTypeDisplay });
-  const headerAmount =
-    draft.amount ??
-    (draft.quantity != null && draft.unitPrice != null
-      ? draft.quantity * draft.unitPrice
-      : undefined);
+  const headerAmount = draft.amount;
   const headerAmountLabel =
     headerAmount !== undefined
       ? isBalanceHidden
