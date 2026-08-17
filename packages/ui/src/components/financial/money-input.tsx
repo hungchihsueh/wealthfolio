@@ -49,6 +49,8 @@ export interface MoneyInputProps {
   autoFocus?: boolean;
   /** Key down handler */
   onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
+  /** Blur handler */
+  onBlur?: (e: React.FocusEvent<HTMLInputElement>) => void;
 }
 
 const MoneyInput = React.forwardRef<HTMLInputElement, MoneyInputProps>(
@@ -72,6 +74,7 @@ const MoneyInput = React.forwardRef<HTMLInputElement, MoneyInputProps>(
       "data-testid": testId,
       autoFocus,
       onKeyDown,
+      onBlur,
     },
     ref,
   ) => {
@@ -102,6 +105,7 @@ const MoneyInput = React.forwardRef<HTMLInputElement, MoneyInputProps>(
         data-testid={testId}
         autoFocus={autoFocus}
         onKeyDown={onKeyDown}
+        onBlur={onBlur}
         allowNegative={false}
         decimalScale={maxDecimalPlaces}
         fixedDecimalScale={fixedDecimalScale}
