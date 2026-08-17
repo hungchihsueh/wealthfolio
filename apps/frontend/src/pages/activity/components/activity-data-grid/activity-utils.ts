@@ -9,7 +9,12 @@ import {
   resolveActivityCash,
 } from "@/lib/activity-utils";
 import { buildAssetResolutionInput, normalizeOptionalString } from "@/lib/asset-resolution-input";
-import { ActivityType, DECIMAL_PRECISION, SUBTYPES_BY_ACTIVITY_TYPE } from "@/lib/constants";
+import {
+  ActivityType,
+  DECIMAL_PRECISION,
+  METADATA_CONTRACT_MULTIPLIER,
+  SUBTYPES_BY_ACTIVITY_TYPE,
+} from "@/lib/constants";
 import type { Account } from "@/lib/types";
 import { normalizeDecimalString, parseLocalDateTime, roundDecimal } from "@/lib/utils";
 import type {
@@ -26,6 +31,15 @@ import { generateTempActivityId } from "./use-activity-grid-state";
  * Set of numeric field names for value comparison
  */
 const NUMERIC_FIELDS = new Set(["quantity", "unitPrice", "amount", "fee", "tax", "fxRate"]);
+
+export function clearContractMultiplierOverride(
+  metadata: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!metadata || !(METADATA_CONTRACT_MULTIPLIER in metadata)) return metadata;
+  const updated = { ...metadata };
+  delete updated[METADATA_CONTRACT_MULTIPLIER];
+  return Object.keys(updated).length > 0 ? updated : undefined;
+}
 
 const isTransferActivity = (activityType: string | undefined): boolean => {
   return activityType === ActivityType.TRANSFER_IN || activityType === ActivityType.TRANSFER_OUT;
@@ -299,13 +313,22 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
     updated = { ...updated, tax: normalizedDecimalOrNull(value) };
   } else if (field === "assetSymbol") {
     const upper = (typeof value === "string" ? value : "").trim().toUpperCase();
+    const previousSymbol = (updated.assetSymbol ?? "").trim().toUpperCase();
+    const identityChanged = upper !== previousSymbol;
     // Only update assetSymbol, NOT assetId
     // For new activities, backend generates canonical assetId from symbol + exchangeMic
     // For existing activities, assetId is preserved from the original data
     updated = {
       ...updated,
       assetSymbol: upper,
-      contractMultiplier: assetMultiplierLookup?.get(upper) ?? updated.contractMultiplier,
+      contractMultiplier: identityChanged
+        ? assetMultiplierLookup?.get(upper)
+        : (assetMultiplierLookup?.get(upper) ?? updated.contractMultiplier),
+      instrumentType: identityChanged ? undefined : updated.instrumentType,
+      pendingInstrumentType: identityChanged ? undefined : updated.pendingInstrumentType,
+      metadata: identityChanged
+        ? clearContractMultiplierOverride(updated.metadata)
+        : updated.metadata,
     };
 
     // Auto-fill currency only if not already set (e.g., by handleSymbolSelect
@@ -393,7 +416,16 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
   } else if (field === "instrumentType") {
     // Instrument type (EQUITY, OPTION, BOND, etc.) — also set pendingInstrumentType for save payload
     const instrumentType = typeof value === "string" && value ? value : undefined;
-    updated = { ...updated, instrumentType, pendingInstrumentType: instrumentType };
+    const identityChanged = instrumentType !== updated.instrumentType;
+    updated = {
+      ...updated,
+      instrumentType,
+      pendingInstrumentType: instrumentType,
+      contractMultiplier: identityChanged ? undefined : updated.contractMultiplier,
+      metadata: identityChanged
+        ? clearContractMultiplierOverride(updated.metadata)
+        : updated.metadata,
+    };
   }
 
   updated = applyCalculatedTradeTotal(updated);

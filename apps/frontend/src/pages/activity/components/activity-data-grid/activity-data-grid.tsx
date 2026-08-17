@@ -23,6 +23,7 @@ import { ActivityDataGridToolbar } from "./activity-data-grid-toolbar";
 import {
   applyCalculatedTradeTotal,
   applyTransactionUpdate,
+  clearContractMultiplierOverride,
   createCurrencyResolver,
   createDraftTransaction,
   PINNED_COLUMNS,
@@ -289,6 +290,16 @@ export function ActivityDataGrid({
           const row = updated[rowIndex];
           dirtyId = row.id;
           const currency = provisionalCurrency ?? row.accountCurrency ?? fallbackCurrency;
+          const identityChanged =
+            canonicalSymbol !== row.assetSymbol?.trim().toUpperCase() ||
+            (canonicalExchangeMic ?? "").toUpperCase() !==
+              (row.exchangeMic ?? "").trim().toUpperCase() ||
+            (result.quoteType ?? "").toUpperCase() !==
+              (row.instrumentType ?? "").trim().toUpperCase();
+          const resolvedMultiplier =
+            (result.existingAssetId
+              ? assetMultiplierLookup.get(result.existingAssetId.trim().toUpperCase())
+              : undefined) ?? assetMultiplierLookup.get(canonicalSymbol);
           updated[rowIndex] = applyCalculatedTradeTotal({
             ...row,
             assetSymbol: canonicalSymbol,
@@ -296,9 +307,11 @@ export function ActivityDataGrid({
             assetQuoteMode: quoteModeFromSearchResult(result),
             currency,
             instrumentType: result.quoteType,
-            contractMultiplier: result.existingAssetId
-              ? assetMultiplierLookup.get(result.existingAssetId.trim().toUpperCase())
-              : undefined,
+            contractMultiplier:
+              resolvedMultiplier ?? (identityChanged ? undefined : row.contractMultiplier),
+            metadata: identityChanged
+              ? clearContractMultiplierOverride(row.metadata)
+              : row.metadata,
             pendingAssetId: result.existingAssetId,
             // Capture asset metadata for custom assets
             pendingAssetName: result.longName,
@@ -394,6 +407,16 @@ export function ActivityDataGrid({
           const row = updated[rowIndex];
           dirtyId = row.id;
           const currency = result.currency ?? row.accountCurrency ?? fallbackCurrency;
+          const identityChanged =
+            canonicalSymbol !== row.assetSymbol?.trim().toUpperCase() ||
+            (canonicalExchangeMic ?? "").toUpperCase() !==
+              (row.exchangeMic ?? "").trim().toUpperCase() ||
+            (result.quoteType ?? "").toUpperCase() !==
+              (row.instrumentType ?? "").trim().toUpperCase();
+          const resolvedMultiplier =
+            (result.existingAssetId
+              ? assetMultiplierLookup.get(result.existingAssetId.trim().toUpperCase())
+              : undefined) ?? assetMultiplierLookup.get(canonicalSymbol);
           updated[rowIndex] = applyCalculatedTradeTotal({
             ...row,
             assetSymbol: canonicalSymbol,
@@ -401,6 +424,11 @@ export function ActivityDataGrid({
             assetQuoteMode: "MANUAL",
             currency,
             instrumentType: result.quoteType,
+            contractMultiplier:
+              resolvedMultiplier ?? (identityChanged ? undefined : row.contractMultiplier),
+            metadata: identityChanged
+              ? clearContractMultiplierOverride(row.metadata)
+              : row.metadata,
             pendingAssetId: result.existingAssetId,
             pendingAssetName: result.longName,
             pendingAssetKind: result.assetKind,
@@ -420,7 +448,13 @@ export function ActivityDataGrid({
 
       setCustomAssetDialog({ open: false, rowIndex: -1, symbol: "" });
     },
-    [customAssetDialog, setLocalTransactions, fallbackCurrency, markDirtyBatch],
+    [
+      assetMultiplierLookup,
+      customAssetDialog,
+      setLocalTransactions,
+      fallbackCurrency,
+      markDirtyBatch,
+    ],
   );
 
   // Column definitions
