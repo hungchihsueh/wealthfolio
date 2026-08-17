@@ -1,4 +1,8 @@
-import { localizeActivitySubtypeName, localizeActivityTypeName } from "@/lib/activity-utils";
+import {
+  localizeActivitySubtypeName,
+  localizeActivityTypeName,
+  resolveActivityCash,
+} from "@/lib/activity-utils";
 import { ActivityStatus, ActivityType } from "@/lib/constants";
 import { formatOptionExpiration, parseOccSymbol } from "@/lib/occ-symbol";
 import type { ActivityDetails } from "@/lib/types";
@@ -104,6 +108,18 @@ export function ActivityDetailSheet({ activity, open, onOpenChange }: ActivityDe
   // Parse OCC symbol for option activities
   const isOption = activity.instrumentType === "OPTION";
   const parsedOption = isOption ? parseOccSymbol(activity.assetSymbol ?? "") : null;
+  const isSplit = activity.activityType === ActivityType.SPLIT;
+  const resolvedCash = resolveActivityCash(activity);
+  const splitAmount =
+    isSplit && activity.amount != null && Number.isFinite(Number(activity.amount))
+      ? Number(activity.amount)
+      : null;
+  const summaryAmount = isSplit
+    ? splitAmount
+    : resolvedCash.amount == null
+      ? null
+      : resolvedCash.signedCashEffect;
+  const detailAmount = isSplit ? splitAmount : resolvedCash.amount;
 
   // Format option expiration for display (YYYY-MM-DD → "Mar 29, 2025")
   const optionExpirationDisplay = parsedOption?.expiration
@@ -175,7 +191,11 @@ export function ActivityDetailSheet({ activity, open, onOpenChange }: ActivityDe
               <div className="text-right">
                 <div className="text-muted-foreground text-xs">{t("activity:field_amount")}</div>
                 <div className="text-lg font-bold">
-                  <AmountDisplay value={Number(activity.amount)} currency={activity.currency} />
+                  {summaryAmount == null ? (
+                    "—"
+                  ) : (
+                    <AmountDisplay value={summaryAmount} currency={activity.currency} />
+                  )}
                 </div>
               </div>
             </div>
@@ -254,7 +274,13 @@ export function ActivityDetailSheet({ activity, open, onOpenChange }: ActivityDe
                       ? t("activity:form.total_credit")
                       : t("activity:form.label_amount")
               }
-              value={<AmountDisplay value={Number(activity.amount)} currency={activity.currency} />}
+              value={
+                detailAmount == null ? (
+                  "—"
+                ) : (
+                  <AmountDisplay value={detailAmount} currency={activity.currency} />
+                )
+              }
             />
             {Number(activity.fee) !== 0 && (
               <DetailRow

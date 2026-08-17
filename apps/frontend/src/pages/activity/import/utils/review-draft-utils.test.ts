@@ -215,16 +215,37 @@ describe("resolveCashActivityFields", () => {
       expect(result.amount).toBeUndefined();
     });
 
-    it("should not swap for TRANSFER_IN/OUT", () => {
+    it("should not swap a security transfer quantity into amount", () => {
       const result = resolveCashActivityFields(
         ActivityType.TRANSFER_IN,
         "100",
         undefined,
         undefined,
+        undefined,
+        "AAPL",
       );
       expect(result.quantity).toBe("100");
       expect(result.amount).toBeUndefined();
     });
+  });
+
+  describe("cash transfers", () => {
+    it.each([undefined, "CASH", "CASH:USD"])(
+      "moves a quantity-only cash value into amount for symbol %s",
+      (symbol) => {
+        const result = resolveCashActivityFields(
+          ActivityType.TRANSFER_IN,
+          "100",
+          undefined,
+          undefined,
+          undefined,
+          symbol,
+        );
+
+        expect(result.quantity).toBeUndefined();
+        expect(result.amount).toBe("100");
+      },
+    );
   });
 
   describe("Schwab CSV scenarios", () => {

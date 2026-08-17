@@ -1,5 +1,5 @@
 import { ActivityType } from "@/lib/constants";
-import { isAssetBackedIncomeSubtype } from "@/lib/activity-utils";
+import { isAssetBackedIncomeSubtype, isCashSymbol } from "@/lib/activity-utils";
 
 /**
  * Parse a numeric value from a string, handling various formats.
@@ -139,10 +139,17 @@ export function resolveCashActivityFields(
   amount: string | undefined,
   unitPrice: string | undefined,
   subtype?: string,
+  symbol?: string,
 ): { quantity: string | undefined; amount: string | undefined } {
+  const normalizedSymbol = symbol?.trim();
+  const isCashTransfer =
+    (activityType === ActivityType.TRANSFER_IN || activityType === ActivityType.TRANSFER_OUT) &&
+    (!normalizedSymbol ||
+      normalizedSymbol.toUpperCase() === "CASH" ||
+      isCashSymbol(normalizedSymbol));
   if (
     activityType &&
-    CASH_LIKE_TYPES.includes(activityType) &&
+    (CASH_LIKE_TYPES.includes(activityType) || isCashTransfer) &&
     !isAssetBackedIncomeSubtype(activityType, subtype) &&
     !toNumber(amount) &&
     toNumber(quantity) &&

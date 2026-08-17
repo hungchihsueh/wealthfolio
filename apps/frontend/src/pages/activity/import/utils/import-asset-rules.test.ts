@@ -369,4 +369,51 @@ describe("import asset rules", () => {
       "Symbol is required for dividend in kind activities",
     ]);
   });
+
+  it("rejects quantity-only cash transfers before import apply", () => {
+    const validation = validateDraft(
+      createDraft({
+        activityType: ActivityType.TRANSFER_IN,
+        symbol: undefined,
+        quantity: "100",
+        unitPrice: undefined,
+        amount: undefined,
+      }),
+    );
+
+    expect(validation.status).toBe("error");
+    expect(validation.errors.amount).toEqual(["Amount is required for cash transfer activities"]);
+  });
+
+  it("accepts quantity-only security transfers", () => {
+    const validation = validateDraft(
+      createDraft({
+        activityType: ActivityType.TRANSFER_IN,
+        symbol: "AAPL",
+        quantity: "10",
+        unitPrice: undefined,
+        amount: undefined,
+      }),
+    );
+
+    expect(validation.status).toBe("valid");
+    expect(validation.errors).toEqual({});
+  });
+
+  it("requires quantity for security transfers even when an amount is supplied", () => {
+    const validation = validateDraft(
+      createDraft({
+        activityType: ActivityType.TRANSFER_IN,
+        symbol: "AAPL",
+        quantity: undefined,
+        unitPrice: undefined,
+        amount: "500",
+      }),
+    );
+
+    expect(validation.status).toBe("error");
+    expect(validation.errors.quantity).toEqual([
+      "Quantity is required for security transfer activities",
+    ]);
+  });
 });
