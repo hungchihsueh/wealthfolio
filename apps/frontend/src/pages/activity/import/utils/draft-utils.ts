@@ -5,7 +5,7 @@ import {
   ImportFormat,
   POSITION_INTENT_ALIASES,
 } from "@/lib/constants";
-import { canonicalizeActivitySubtype } from "@/lib/activity-utils";
+import { canonicalizeActivitySubtype, isCashSymbol } from "@/lib/activity-utils";
 import type { ActivityImport } from "@/lib/types";
 import { tryParseDate } from "@/lib/utils";
 import { isValid, parse, parseISO } from "date-fns";
@@ -580,12 +580,18 @@ export function validateDraft(
     }
   }
 
-  // TRANSFER_IN/TRANSFER_OUT - amount or quantity required
+  // Cash transfers need a cash amount. Security transfers need units.
   if (activityType === ActivityType.TRANSFER_IN || activityType === ActivityType.TRANSFER_OUT) {
+    const symbol = draft.symbol?.trim();
+    const isSecurityTransfer = Boolean(
+      symbol && symbol.toUpperCase() !== "CASH" && !isCashSymbol(symbol),
+    );
     const hasAmount = hasPositiveValue(draft.amount);
     const hasQuantity = hasPositiveValue(draft.quantity);
-    if (!hasAmount && !hasQuantity) {
-      errors.amount = ["Amount or quantity is required for transfer activities"];
+    if (isSecurityTransfer && !hasQuantity) {
+      errors.quantity = ["Quantity is required for security transfer activities"];
+    } else if (!isSecurityTransfer && !hasAmount) {
+      errors.amount = ["Amount is required for cash transfer activities"];
     }
   }
 
@@ -822,7 +828,14 @@ export function createDraftActivities(
       amount = tax;
       tax = undefined;
     }
-    const resolved = resolveCashActivityFields(activityType, quantity, amount, unitPrice, subtype);
+    const resolved = resolveCashActivityFields(
+      activityType,
+      quantity,
+      amount,
+      unitPrice,
+      subtype,
+      symbol,
+    );
 
     // Infer boundary semantics for transfers and cash-account expense reversals.
     const isTransfer =
