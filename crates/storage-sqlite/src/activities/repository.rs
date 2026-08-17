@@ -1960,7 +1960,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
             .await
     }
 
-    /// Fetches contribution-eligible activities (DEPOSIT, TRANSFER_IN, TRANSFER_OUT, CREDIT)
+    /// Fetches posted contribution candidates (DEPOSIT, TRANSFER_IN, TRANSFER_OUT, CREDIT)
     /// for the given accounts within the date range.
     fn get_contribution_activities(
         &self,
@@ -1993,6 +1993,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
             .inner_join(accounts::table.on(activities::account_id.eq(accounts::id)))
             .filter(accounts::id.eq_any(eligible_account_ids))
             .filter(accounts::is_archived.eq(false))
+            .filter(activities::status.eq("POSTED"))
             .filter(activities::activity_type.eq_any(CONTRIBUTION_TYPES))
             .filter(activities::activity_date.ge(start_utc.to_rfc3339()))
             .filter(activities::activity_date.lt(end_exclusive_utc.to_rfc3339()))
@@ -2974,6 +2975,59 @@ mod tests {
             .map(|activity| activity.id.as_str())
             .collect();
         assert_eq!(ids, HashSet::from(["split-1", "split-2", "archived-split"]));
+    }
+
+    #[tokio::test]
+    async fn contribution_activity_query_excludes_draft_mapping_evidence() {
+        let (pool, writer) = setup_db();
+        let repo = ActivityRepository::new(pool.clone(), writer);
+
+        {
+            let mut conn = get_connection(&pool).expect("conn");
+            insert_account(&mut conn, "registered-account");
+            diesel::update(accounts::table.filter(accounts::id.eq("registered-account")))
+                .set(accounts::account_type.eq("SECURITIES"))
+                .execute(&mut conn)
+                .expect("set securities account type");
+            diesel::sql_query(
+                "INSERT INTO activities
+                 (id, account_id, activity_type, subtype, status, activity_date, amount, currency,
+                  metadata, source_system, is_user_modified, needs_review, created_at, updated_at)
+                 VALUES
+                 ('posted-deposit', 'registered-account', 'DEPOSIT', NULL, 'POSTED',
+                  '2025-06-15T12:00:00Z', '100', 'USD', NULL, 'MANUAL', 0, 0,
+                  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                 ('draft-deposit', 'registered-account', 'DEPOSIT', NULL, 'DRAFT',
+                  '2025-06-16T12:00:00Z', '200', 'USD', NULL, 'SNAPTRADE', 0, 1,
+                  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                 ('draft-transfer', 'registered-account', 'TRANSFER_IN', NULL, 'DRAFT',
+                  '2025-06-17T12:00:00Z', '300', 'USD',
+                  '{\"flow\":{\"is_external\":true}}', 'SNAPTRADE', 0, 1,
+                  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                 ('draft-bonus', 'registered-account', 'CREDIT', 'BONUS', 'DRAFT',
+                  '2025-06-18T12:00:00Z', '400', 'USD',
+                  '{\"flow\":{\"is_external\":true}}', 'SNAPTRADE', 0, 1,
+                  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            )
+            .execute(&mut conn)
+            .expect("insert posted and draft contribution candidates");
+        }
+
+        let activities = repo
+            .get_contribution_activities(
+                &["registered-account".to_string()],
+                DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            )
+            .expect("load contribution candidates");
+
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].activity_type, "DEPOSIT");
+        assert_eq!(activities[0].amount, Some(Decimal::from(100)));
     }
 
     #[tokio::test]

@@ -142,8 +142,9 @@ pub trait ActivityRepositoryTrait: Send + Sync {
     }
     fn get_trading_activities(&self) -> Result<Vec<Activity>>;
     fn get_income_activities(&self) -> Result<Vec<Activity>>;
-    /// Fetches contribution-eligible activities (DEPOSIT, TRANSFER_IN, TRANSFER_OUT, CREDIT)
-    /// for the given accounts within the date range. Filtering logic applied in service layer.
+    /// Fetches posted contribution candidates (DEPOSIT, TRANSFER_IN, TRANSFER_OUT, CREDIT)
+    /// for the given accounts within the date range. Contribution classification is applied in
+    /// the service layer.
     fn get_contribution_activities(
         &self,
         account_ids: &[String],
