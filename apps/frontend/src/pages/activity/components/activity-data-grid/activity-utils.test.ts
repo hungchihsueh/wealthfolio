@@ -1003,6 +1003,58 @@ describe("activity-utils", () => {
       expect(updated.amount).toBe("101");
     });
 
+    it("clears a stale multiplier override when the asset symbol changes", () => {
+      const updated = applyTransactionUpdate({
+        transaction: createMockTransaction({
+          assetSymbol: "OLDOPT",
+          instrumentType: "OPTION",
+          contractMultiplier: 10,
+          metadata: { contract_multiplier: 10, source: "import" },
+          quantity: "2",
+          unitPrice: "5",
+          amount: null,
+          fee: "1",
+          amountMode: "calculated",
+        }),
+        field: "assetSymbol",
+        value: "equity",
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+
+      expect(updated.contractMultiplier).toBeUndefined();
+      expect(updated.instrumentType).toBeUndefined();
+      expect(updated.metadata).toEqual({ source: "import" });
+      expect(updated.amount).toBe("11");
+    });
+
+    it("clears a stale multiplier override when the instrument type changes", () => {
+      const updated = applyTransactionUpdate({
+        transaction: createMockTransaction({
+          instrumentType: "OPTION",
+          contractMultiplier: 10,
+          metadata: { contract_multiplier: 10 },
+          quantity: "2",
+          unitPrice: "5",
+          amount: null,
+          fee: "1",
+          amountMode: "calculated",
+        }),
+        field: "instrumentType",
+        value: "EQUITY",
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+
+      expect(updated.contractMultiplier).toBeUndefined();
+      expect(updated.metadata).toBeUndefined();
+      expect(updated.amount).toBe("11");
+    });
+
     it("clears a calculated trade total when changing to a non-calculated type", () => {
       const updated = applyTransactionUpdate({
         transaction: createMockTransaction({

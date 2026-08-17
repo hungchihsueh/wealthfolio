@@ -1,7 +1,11 @@
 import { restrictionAllowsType } from "@/lib/activity-restrictions";
 import { ACTIVITY_SUBTYPES, ActivityType, QuoteMode } from "@/lib/constants";
 import { useSettingsContext } from "@/lib/settings-provider";
-import { findAssetContractMultiplier } from "@/lib/activity-utils";
+import {
+  calculateAssetBackedIncomeAmount,
+  findAssetContractMultiplier,
+  getContractMultiplier,
+} from "@/lib/activity-utils";
 import { roundDecimal } from "@/lib/utils";
 import { useAssets } from "@/pages/asset/hooks/use-assets";
 import {
@@ -216,13 +220,30 @@ export function MobileDetailsStep({ accounts, activityType, isEditing }: MobileD
   const incomeMode = subtype ?? INCOME_MODE_CASH;
   const incomeFee = isAssetBackedIncome ? watch("fee") : undefined;
   const incomeTax = isAssetBackedIncome ? watch("tax") : undefined;
+  const incomeAssetId = isAssetBackedIncome ? watch("assetId") : undefined;
+  const incomeExistingAssetId = isAssetBackedIncome
+    ? (watch("existingAssetId" as any) as string | undefined)
+    : undefined;
+  const incomeInstrumentType = isAssetBackedIncome
+    ? (watch("symbolInstrumentType" as any) as string | undefined)
+    : undefined;
+  const incomeAssetMultiplier = useMemo(
+    () =>
+      findAssetContractMultiplier(assets, [incomeExistingAssetId, incomeAssetId]) ??
+      getContractMultiplier({ instrumentType: incomeInstrumentType }),
+    [assets, incomeAssetId, incomeExistingAssetId, incomeInstrumentType],
+  );
   const calculatedIncomeAmount = useMemo(() => {
     if (!isAssetBackedIncome) return 0;
-    const gross = Number(quantity) * Number(unitPrice);
-    const charges = Number(incomeFee || 0) + Number(incomeTax || 0);
-    const total = gross - charges;
+    const total = calculateAssetBackedIncomeAmount(
+      quantity,
+      unitPrice,
+      incomeAssetMultiplier,
+      incomeFee,
+      incomeTax,
+    );
     return total > 0 ? roundDecimal(total) : 0;
-  }, [incomeFee, incomeTax, isAssetBackedIncome, quantity, unitPrice]);
+  }, [incomeAssetMultiplier, incomeFee, incomeTax, isAssetBackedIncome, quantity, unitPrice]);
 
   const isAdjustmentActivity = activityType === ActivityType.ADJUSTMENT;
   const isFeeActivity = activityType === ActivityType.FEE;

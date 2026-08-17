@@ -153,6 +153,38 @@ describe("useActivityMutations", () => {
     );
   });
 
+  it("preserves only the contract multiplier when duplicating a custom option trade", async () => {
+    const { result } = renderHook(() => useActivityMutations(), { wrapper: createWrapper() });
+
+    await act(async () => {
+      await result.current.duplicateActivityMutation.mutateAsync({
+        id: "activity-option",
+        accountId: "acc-1",
+        activityType: ActivityType.BUY,
+        date: "2026-04-30T16:00:00Z",
+        assetId: "asset-option",
+        assetSymbol: "AAPL260116C00250000",
+        instrumentType: "OPTION",
+        quantity: "2",
+        unitPrice: "5",
+        amount: "100",
+        fee: "0",
+        currency: "USD",
+        metadata: {
+          broker_reference: "private-provider-value",
+          contract_multiplier: 10,
+        },
+      } as any);
+    });
+
+    expect(adapterMocks.createActivity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        amount: undefined,
+        metadata: { contract_multiplier: 10 },
+      }),
+    );
+  });
+
   it.each([true, false])(
     "preserves only an explicit %s performance boundary when duplicating",
     async (isExternal) => {

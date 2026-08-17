@@ -1,5 +1,11 @@
 import { useSettings } from "@/hooks/use-settings";
+import {
+  calculateAssetBackedIncomeAmount,
+  findAssetContractMultiplier,
+  getContractMultiplier,
+} from "@/lib/activity-utils";
 import { ACTIVITY_SUBTYPES, ActivityType } from "@/lib/constants";
+import { useAssets } from "@/pages/asset/hooks/use-assets";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
@@ -198,6 +204,7 @@ export function DividendForm({
 }: DividendFormProps) {
   const { t } = useTranslation(["activity"]);
   const { data: settings } = useSettings();
+  const { assets } = useAssets();
   const baseCurrency = settings?.baseCurrency;
 
   const schema = useMemo(() => createDividendFormSchema(t), [t]);
@@ -235,19 +242,25 @@ export function DividendForm({
   const subtype = watch("subtype");
   const quantity = watch("quantity");
   const unitPrice = watch("unitPrice");
+  const symbol = watch("symbol");
+  const existingAssetId = watch("existingAssetId");
+  const symbolInstrumentType = watch("symbolInstrumentType");
   const fee = watch("fee");
   const tax = watch("tax");
   const isAssetBacked =
     subtype === ACTIVITY_SUBTYPES.DRIP || subtype === ACTIVITY_SUBTYPES.DIVIDEND_IN_KIND;
   const dividendMode = subtype ?? INCOME_MODE_CASH;
+  const assetMultiplier = useMemo(
+    () =>
+      findAssetContractMultiplier(assets, [existingAssetId, symbol]) ??
+      getContractMultiplier({ instrumentType: symbolInstrumentType ?? undefined }),
+    [assets, existingAssetId, symbol, symbolInstrumentType],
+  );
 
   const calculatedIncomeAmount = useMemo(() => {
     if (!isAssetBacked) return 0;
-    const q = Number(quantity);
-    const p = Number(unitPrice);
-    const amount = q * p - Number(fee || 0) - Number(tax || 0);
-    return q > 0 && p > 0 && amount > 0 ? amount : 0;
-  }, [fee, isAssetBacked, quantity, tax, unitPrice]);
+    return calculateAssetBackedIncomeAmount(quantity, unitPrice, assetMultiplier, fee, tax);
+  }, [assetMultiplier, fee, isAssetBacked, quantity, tax, unitPrice]);
 
   const handleDividendModeChange = (value: string) => {
     setValue("subtype", value === INCOME_MODE_CASH ? null : value, {

@@ -14,6 +14,7 @@ import {
   needsImportAssetResolution,
   calculateActivityValue,
   calculateActivityCashImpact,
+  calculateAssetBackedIncomeAmount,
   canonicalizeActivitySubtype,
   formatSplitRatio,
   supportsPerformanceBoundary,
@@ -21,6 +22,17 @@ import {
 import { ActivityDetails } from "./types";
 
 describe("Activity Utilities", () => {
+  describe("calculateAssetBackedIncomeAmount", () => {
+    it("applies the canonical multiplier before deducting charges", () => {
+      expect(calculateAssetBackedIncomeAmount(2, 5, 10, 1, 2)).toBe(97);
+    });
+
+    it("does not return incomplete or non-positive totals", () => {
+      expect(calculateAssetBackedIncomeAmount(2, undefined, 10, 0, 0)).toBe(0);
+      expect(calculateAssetBackedIncomeAmount(1, 1, 1, 2, 0)).toBe(0);
+    });
+  });
+
   describe("isCashActivity", () => {
     it("should identify cash activities correctly", () => {
       expect(isCashActivity(ActivityType.DEPOSIT)).toBe(true);

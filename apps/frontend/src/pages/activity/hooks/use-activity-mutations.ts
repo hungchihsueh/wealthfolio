@@ -20,7 +20,7 @@ import {
   InternalTransferPairResponse,
 } from "@/lib/types";
 import { isSecuritiesTransfer } from "@/lib/activity-utils";
-import { ActivityType, InstrumentType } from "@/lib/constants";
+import { ActivityType, InstrumentType, METADATA_CONTRACT_MULTIPLIER } from "@/lib/constants";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { NewActivityFormValues } from "../components/forms/schemas";
@@ -354,10 +354,14 @@ export function useActivityMutations(
       restOfActivityData.activityType === ActivityType.TRANSFER_IN ||
       restOfActivityData.activityType === ActivityType.TRANSFER_OUT;
     const flow = activityToDuplicate.metadata?.flow as Record<string, unknown> | undefined;
-    const boundaryMetadata =
-      supportsBoundary && typeof flow?.is_external === "boolean"
-        ? { flow: { is_external: flow.is_external } }
-        : undefined;
+    const duplicateMetadata: Record<string, unknown> = {};
+    if (supportsBoundary && typeof flow?.is_external === "boolean") {
+      duplicateMetadata.flow = { is_external: flow.is_external };
+    }
+    const contractMultiplier = Number(activityToDuplicate.metadata?.[METADATA_CONTRACT_MULTIPLIER]);
+    if (isBuyOrSell && Number.isFinite(contractMultiplier) && contractMultiplier > 0) {
+      duplicateMetadata[METADATA_CONTRACT_MULTIPLIER] = contractMultiplier;
+    }
 
     // For duplicating, use nested asset object
     const createPayload: ActivityCreate = {
@@ -374,7 +378,7 @@ export function useActivityMutations(
       fxRate: restOfActivityData.fxRate ?? undefined,
       activityDate: date,
       comment: "Duplicated",
-      metadata: boundaryMetadata,
+      metadata: Object.keys(duplicateMetadata).length > 0 ? duplicateMetadata : undefined,
       asset: buildAssetResolutionInput({
         id: _assetId,
         symbol: assetSymbol,

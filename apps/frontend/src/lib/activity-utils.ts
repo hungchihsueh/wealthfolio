@@ -405,6 +405,22 @@ export const findAssetContractMultiplier = (
   return undefined;
 };
 
+export const calculateAssetBackedIncomeAmount = (
+  quantity: unknown,
+  unitPrice: unknown,
+  multiplier: unknown,
+  fee: unknown,
+  tax: unknown,
+): number => {
+  const q = Number(quantity);
+  const price = Number(unitPrice);
+  const resolvedMultiplier = Number(multiplier);
+  if (!(q > 0) || !(price > 0) || !(resolvedMultiplier > 0)) return 0;
+
+  const total = q * price * resolvedMultiplier - Number(fee || 0) - Number(tax || 0);
+  return total > 0 ? total : 0;
+};
+
 export interface ResolvedActivityCash {
   amount: number | null;
   expectedAmount: number | null;

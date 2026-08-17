@@ -16,6 +16,10 @@ vi.mock("@/hooks/use-settings", () => ({
   }),
 }));
 
+vi.mock("@/pages/asset/hooks/use-assets", () => ({
+  useAssets: () => ({ assets: [] }),
+}));
+
 // Mock the fields components with actual form integration
 vi.mock("../fields", () => ({
   AccountSelect: ({ name, accounts }: { name: string; accounts: AccountSelectOption[] }) => (
