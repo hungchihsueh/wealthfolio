@@ -1,5 +1,6 @@
 import { DECIMAL_PRECISION } from "@/lib/constants";
-import { formatAmount, roundDecimal } from "@/lib/utils";
+import { roundDecimal } from "@/lib/utils";
+import { useAmountFormatting } from "@wealthfolio/ui";
 import { useEffect, useMemo, useState } from "react";
 import { useFormContext, useFormState } from "react-hook-form";
 import { useTranslation } from "react-i18next";
@@ -35,6 +36,7 @@ export function TradeTotalInput({
   "data-testid": dataTestId,
 }: TradeTotalInputProps) {
   const { t } = useTranslation(["activity"]);
+  const formatting = useAmountFormatting();
   const { control, getFieldState, resetField, watch } = useFormContext<TradeTotalFormValues>();
   const formState = useFormState({ control, name: "amount" });
   const amount = watch("amount");
@@ -74,7 +76,7 @@ export function TradeTotalInput({
   const numericAmount = Number(amount);
   const displayedAmount = numericAmount > 0 ? numericAmount : normalizedCalculatedAmount;
   const formattedCalculatedAmount = normalizedCalculatedAmount
-    ? formatAmount(normalizedCalculatedAmount, currency ?? "", Boolean(currency))
+    ? formatting.formatAmount(normalizedCalculatedAmount, currency ?? "", Boolean(currency))
     : null;
 
   return (
@@ -119,7 +121,7 @@ export function TradeTotalInput({
       {side !== "income" && displayedAmount && displayedAmount > 0 ? (
         <p className="text-muted-foreground text-xs">
           {t("activity:form.cash_effect")}: {side === "buy" ? "−" : "+"}
-          {formatAmount(displayedAmount, currency ?? "", Boolean(currency))}
+          {formatting.formatAmount(displayedAmount, currency ?? "", Boolean(currency))}
         </p>
       ) : null}
     </div>
