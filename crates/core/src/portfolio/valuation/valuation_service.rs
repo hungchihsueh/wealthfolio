@@ -4909,9 +4909,10 @@ mod tests {
     }
 
     #[test]
-    fn cash_transfer_flow_uses_activity_amount() {
-        let activity =
+    fn cash_transfer_flow_uses_pre_charge_gross_amount() {
+        let mut activity =
             transfer_activity(ACTIVITY_TYPE_TRANSFER_IN, None, None, None, Some(dec!(250)));
+        activity.fee = Some(dec!(5));
 
         let economics = ValuationService::resolve_activity_economics_for_boundary(
             &activity,
@@ -4920,7 +4921,7 @@ mod tests {
         );
 
         assert_eq!(economics.lot_cost_basis_value, Decimal::ZERO);
-        assert_eq!(economics.performance_flow_value, dec!(250));
+        assert_eq!(economics.performance_flow_value, dec!(255));
         assert_eq!(
             economics.performance_flow_source,
             ExternalFlowSource::CashAmount

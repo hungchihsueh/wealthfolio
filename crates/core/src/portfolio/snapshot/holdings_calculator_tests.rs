@@ -1543,7 +1543,7 @@ mod tests {
         previous_snapshot.net_contribution = dec!(500); // Initial 500 CAD net contribution
         previous_snapshot.net_contribution_base = dec!(500);
 
-        let deposit_usd_activity = create_cash_activity(
+        let mut deposit_usd_activity = create_cash_activity(
             "act_deposit_usd_1",
             ActivityType::Deposit,
             dec!(100),         // Depositing 100 USD
@@ -1551,6 +1551,7 @@ mod tests {
             activity_currency, // USD
             target_date_str,
         );
+        deposit_usd_activity.amount = Some(dec!(99));
 
         let activities_today = vec![deposit_usd_activity.clone()];
 
@@ -1666,7 +1667,7 @@ mod tests {
         previous_snapshot.net_contribution = dec!(1000); // Initial 1000 CAD net contribution
         previous_snapshot.net_contribution_base = dec!(1000);
 
-        let withdrawal_usd_activity = create_cash_activity(
+        let mut withdrawal_usd_activity = create_cash_activity(
             "act_withdraw_usd_1",
             ActivityType::Withdrawal,
             dec!(50),          // Withdrawing 50 USD
@@ -1674,6 +1675,7 @@ mod tests {
             activity_currency, // USD
             target_date_str,
         );
+        withdrawal_usd_activity.amount = Some(dec!(52));
 
         let activities_today = vec![withdrawal_usd_activity.clone()];
 
@@ -2020,6 +2022,7 @@ mod tests {
             target_date_str,
         );
         bonus_activity.tax = Some(dec!(10));
+        bonus_activity.amount = Some(dec!(88));
         bonus_activity.subtype = Some(ACTIVITY_SUBTYPE_BONUS.to_string());
 
         let result =
@@ -2027,10 +2030,10 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Cash: 1000 + final cash amount 100 = 1100.
+        // Cash: 1000 + final cash amount 88 = 1088.
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(1100))
+            Some(&dec!(1088))
         );
         // BONUS credit adds GROSS amount to net_contribution: 500 + 100 = 600
         assert_eq!(next_state.net_contribution, dec!(600));
@@ -2064,6 +2067,7 @@ mod tests {
             target_date_str,
         );
         deposit_activity.tax = Some(dec!(10));
+        deposit_activity.amount = Some(dec!(88));
 
         let result = calculator.calculate_next_holdings(
             &previous_snapshot,
@@ -2073,10 +2077,10 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Cash: 1000 + final cash amount 100 = 1100.
+        // Cash: 1000 + final cash amount 88 = 1088.
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(1100))
+            Some(&dec!(1088))
         );
         // net_contribution uses GROSS amount: 500 + 100 = 600
         assert_eq!(next_state.net_contribution, dec!(600));
@@ -2109,6 +2113,7 @@ mod tests {
             target_date_str,
         );
         withdrawal_activity.tax = Some(dec!(10));
+        withdrawal_activity.amount = Some(dec!(112));
 
         let result = calculator.calculate_next_holdings(
             &previous_snapshot,
@@ -2118,10 +2123,10 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Cash: 1000 - final cash amount 100 = 900.
+        // Cash: 1000 - final cash amount 112 = 888.
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(900))
+            Some(&dec!(888))
         );
         // net_contribution uses GROSS amount: 500 - 100 = 400
         assert_eq!(next_state.net_contribution, dec!(400));
@@ -2155,6 +2160,7 @@ mod tests {
             target_date_str,
         );
         transfer_in_activity.tax = Some(dec!(10));
+        transfer_in_activity.amount = Some(dec!(88));
 
         let result = calculator.calculate_next_holdings(
             &previous_snapshot,
@@ -2164,10 +2170,10 @@ mod tests {
         assert!(result.is_ok(), "TransferIn failed: {:?}", result.err());
         let state_after_in = result.unwrap().snapshot;
 
-        // Cash: 1000 + final cash amount 100 = 1100.
+        // Cash: 1000 + final cash amount 88 = 1088.
         assert_eq!(
             state_after_in.cash_balances.get(account_currency),
-            Some(&dec!(1100))
+            Some(&dec!(1088))
         );
         // net_contribution uses GROSS amount: 500 + 100 = 600
         assert_eq!(state_after_in.net_contribution, dec!(600));
@@ -2182,6 +2188,7 @@ mod tests {
             "2023-01-07",
         );
         transfer_out_activity.tax = Some(dec!(5));
+        transfer_out_activity.amount = Some(dec!(57));
 
         let result = calculator.calculate_next_holdings(
             &state_after_in,
@@ -2191,10 +2198,10 @@ mod tests {
         assert!(result.is_ok(), "TransferOut failed: {:?}", result.err());
         let state_after_out = result.unwrap().snapshot;
 
-        // Cash: 1100 - final cash amount 50 = 1050.
+        // Cash: 1088 - final cash amount 57 = 1031.
         assert_eq!(
             state_after_out.cash_balances.get(account_currency),
-            Some(&dec!(1050))
+            Some(&dec!(1031))
         );
         // net_contribution uses GROSS amount: 600 - 50 = 550
         assert_eq!(state_after_out.net_contribution, dec!(550));
@@ -3022,7 +3029,7 @@ mod tests {
         ); // 4687.8 CAD
 
         // --- 3. Cash TransferIn (USD into CAD account) ---
-        let transfer_in_cash_activity = create_cash_activity(
+        let mut transfer_in_cash_activity = create_cash_activity(
             "act_tx_in_cash",
             ActivityType::TransferIn,
             dec!(1000),
@@ -3030,6 +3037,7 @@ mod tests {
             cash_transfer_currency,
             target_date_cash_transfer_str, // 1000 USD, 8 USD fee
         );
+        transfer_in_cash_activity.amount = Some(dec!(992));
         let activities_cash_tx_in = vec![transfer_in_cash_activity.clone()];
         let result_cash_tx_in = calculator.calculate_next_holdings(
             &state_after_asset_tx_out,
@@ -3045,14 +3053,14 @@ mod tests {
 
         // Cash checks (booked in ACTIVITY currency - USD, per design spec)
         // Security transfers did not move cash. The cash transfer's stored amount
-        // is the final credit, so the USD balance becomes 1000.
+        // is the final credit, so the USD balance becomes 992.
         // CAD balance unchanged: 5000 CAD
         let expected_usd_after_cash_tx_in = transfer_in_cash_activity.amt();
         assert_eq!(
             state_after_cash_tx_in
                 .cash_balances
                 .get(cash_transfer_currency),
-            Some(&expected_usd_after_cash_tx_in) // 977 USD
+            Some(&expected_usd_after_cash_tx_in) // 992 USD
         );
         assert_eq!(
             state_after_cash_tx_in.cash_balances.get(account_currency),
@@ -3068,7 +3076,7 @@ mod tests {
 
         // Net Contribution (CAD) - Transfers affect account-level net_contribution
         let expected_net_contribution_after_cash_in = expected_net_contribution_after_asset_out
-            + (transfer_in_cash_activity.amt() * rate_cash_date);
+            + (transfer_in_cash_activity.price() * rate_cash_date);
         assert_eq!(
             state_after_cash_tx_in.net_contribution,
             expected_net_contribution_after_cash_in
@@ -3081,7 +3089,7 @@ mod tests {
         ); // 4687.8 CAD
 
         // --- 4. Cash TransferOut (USD from CAD account) ---
-        let transfer_out_cash_activity = create_cash_activity(
+        let mut transfer_out_cash_activity = create_cash_activity(
             "act_tx_out_cash",
             ActivityType::TransferOut,
             dec!(200),
@@ -3089,6 +3097,7 @@ mod tests {
             cash_transfer_currency,
             target_date_cash_transfer_str, // 200 USD, 3 USD fee
         );
+        transfer_out_cash_activity.amount = Some(dec!(203));
         let activities_cash_tx_out = vec![transfer_out_cash_activity.clone()];
         let result_cash_tx_out = calculator.calculate_next_holdings(
             &state_after_cash_tx_in,
@@ -3103,7 +3112,7 @@ mod tests {
         let state_after_cash_tx_out = result_cash_tx_out.unwrap().snapshot;
 
         // Cash checks (booked in ACTIVITY currency - USD, per design spec)
-        // Cash TransferOut uses its final stored cash debit of 200.
+        // Cash TransferOut uses its final stored cash debit of 203.
         // CAD balance unchanged: 5000 CAD
         let expected_usd_after_cash_tx_out =
             expected_usd_after_cash_tx_in - transfer_out_cash_activity.amt();
@@ -3127,7 +3136,7 @@ mod tests {
 
         // Net Contribution (CAD) - Transfers affect account-level net_contribution
         let expected_net_contribution_after_cash_out = expected_net_contribution_after_cash_in
-            - (transfer_out_cash_activity.amt() * rate_cash_date);
+            - (transfer_out_cash_activity.price() * rate_cash_date);
         assert_eq!(
             state_after_cash_tx_out.net_contribution,
             expected_net_contribution_after_cash_out
@@ -3413,7 +3422,7 @@ mod tests {
         previous_snapshot.net_contribution_base = initial_net_contribution;
 
         // Activities
-        let deposit_usd_activity = create_cash_activity(
+        let mut deposit_usd_activity = create_cash_activity(
             "act_deposit_usd",
             ActivityType::Deposit,
             dec!(100), // 100 USD
@@ -3421,6 +3430,7 @@ mod tests {
             usd_currency,
             target_date_str,
         ); // Net 98 USD
+        deposit_usd_activity.amount = Some(dec!(98));
 
         let buy_stock_usd_activity = create_default_activity(
             "act_buy_xyz",
@@ -3433,7 +3443,7 @@ mod tests {
             target_date_str,
         ); // Cost 51 USD (10*5 + 1)
 
-        let deposit_eur_activity = create_cash_activity(
+        let mut deposit_eur_activity = create_cash_activity(
             "act_deposit_eur",
             ActivityType::Deposit,
             dec!(200), // 200 EUR
@@ -3441,6 +3451,7 @@ mod tests {
             eur_currency,
             target_date_str,
         ); // Net 195 EUR
+        deposit_eur_activity.amount = Some(dec!(195));
 
         let activities_today = vec![
             deposit_usd_activity.clone(),
@@ -3470,21 +3481,21 @@ mod tests {
         );
 
         // USD Balance:
-        // USD Deposit: +100 USD final cash amount
+        // USD Deposit: +98 USD final cash amount
         // USD Buy Stock: -51 USD (10*5 + 1 fee)
-        // Total: 100 - 51 = 49 USD
-        let expected_usd_cash = dec!(100) - dec!(51);
+        // Total: 98 - 51 = 47 USD
+        let expected_usd_cash = dec!(98) - dec!(51);
         assert_eq!(
             next_state.cash_balances.get(usd_currency),
-            Some(&expected_usd_cash), // 49 USD
+            Some(&expected_usd_cash), // 47 USD
             "USD cash balance mismatch"
         );
 
-        // EUR Balance: 200 EUR final cash amount
-        let expected_eur_cash = dec!(200);
+        // EUR Balance: 195 EUR final cash amount
+        let expected_eur_cash = dec!(195);
         assert_eq!(
             next_state.cash_balances.get(eur_currency),
-            Some(&expected_eur_cash), // 200 EUR
+            Some(&expected_eur_cash), // 195 EUR
             "EUR cash balance mismatch"
         );
 

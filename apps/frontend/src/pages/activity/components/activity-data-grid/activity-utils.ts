@@ -38,7 +38,7 @@ export function clearContractMultiplierOverride(
   if (!metadata || !(METADATA_CONTRACT_MULTIPLIER in metadata)) return metadata;
   const updated = { ...metadata };
   delete updated[METADATA_CONTRACT_MULTIPLIER];
-  return Object.keys(updated).length > 0 ? updated : undefined;
+  return updated;
 }
 
 const isTransferActivity = (activityType: string | undefined): boolean => {
@@ -529,20 +529,27 @@ export function buildSavePayload(
 
     const isNew = transaction.isNew === true;
 
-    // Build metadata JSON if an explicit performance boundary is present.
+    // Existing edits must send metadata so cleared overrides replace the stored value.
+    // New duplicates copy only supported user-owned metadata, not provider fields.
     let metadataJson: string | undefined;
+    const hasExistingMetadata = !isNew && typeof transaction.metadata === "object";
+    const metadataForPayload: Record<string, unknown> = hasExistingMetadata
+      ? { ...transaction.metadata }
+      : {};
+    if (isNew && typeof transaction.metadata === "object") {
+      const multiplier = Number(transaction.metadata[METADATA_CONTRACT_MULTIPLIER]);
+      if (Number.isFinite(multiplier) && multiplier > 0) {
+        metadataForPayload[METADATA_CONTRACT_MULTIPLIER] = multiplier;
+      }
+    }
     if (supportsBoundary && transaction.isExternal != null) {
-      // Existing updates retain metadata. New manual duplicates carry only the boundary marker.
-      const existingMeta =
-        !isNew && typeof transaction.metadata === "object" ? transaction.metadata : {};
-      const newMeta = {
-        ...existingMeta,
-        flow: {
-          ...(existingMeta?.flow as Record<string, unknown> | undefined),
-          is_external: transaction.isExternal,
-        },
+      metadataForPayload.flow = {
+        ...((metadataForPayload.flow as Record<string, unknown> | undefined) ?? {}),
+        is_external: transaction.isExternal,
       };
-      metadataJson = JSON.stringify(newMeta);
+    }
+    if (hasExistingMetadata || Object.keys(metadataForPayload).length > 0) {
+      metadataJson = JSON.stringify(metadataForPayload);
     }
 
     // Common payload fields (shared between create and update)

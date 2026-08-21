@@ -8283,7 +8283,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_import_allows_unknown_provider_subtype_label() {
+    async fn test_import_allows_unknown_provider_subtype_label_and_derives_total() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());
         let fx_service = Arc::new(MockFxService::new());
@@ -8293,7 +8293,7 @@ mod tests {
         account_service.add_account(account);
 
         let activity_service = ActivityService::new(
-            activity_repository,
+            activity_repository.clone(),
             account_service,
             asset_service,
             fx_service,
@@ -8308,9 +8308,9 @@ mod tests {
             quantity: Some(dec!(1)),
             unit_price: Some(dec!(5)),
             currency: "USD".to_string(),
-            fee: Some(dec!(0)),
-            tax: None,
-            amount: Some(dec!(500)),
+            fee: Some(dec!(1)),
+            tax: Some(dec!(2)),
+            amount: None,
             comment: None,
             account_id: Some("acc-1".to_string()),
             account_name: None,
@@ -8347,6 +8347,11 @@ mod tests {
             result.activities[0].subtype.as_deref(),
             Some("POSITION_OPEN")
         );
+        let stored = activity_repository
+            .get_activities()
+            .expect("stored activities should be readable");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].amount, Some(dec!(503)));
     }
 
     #[tokio::test]

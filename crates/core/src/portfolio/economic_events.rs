@@ -155,6 +155,20 @@ pub struct ResolvedActivityCash {
     pub amount_was_derived: bool,
 }
 
+impl ResolvedActivityCash {
+    /// Signed pre-charge economics for external contribution/performance flows.
+    pub fn signed_gross_effect(&self) -> Decimal {
+        let gross = self.gross_amount.or(self.amount).unwrap_or(Decimal::ZERO);
+        if self.signed_cash_effect.is_sign_negative() {
+            -gross
+        } else if self.signed_cash_effect.is_sign_positive() {
+            gross
+        } else {
+            Decimal::ZERO
+        }
+    }
+}
+
 impl ActivityEconomicsResolver {
     pub fn resolve_cash(activity: &Activity, unit_multiplier: Decimal) -> ResolvedActivityCash {
         Self::resolve_cash_inputs(ActivityCashInputs {
@@ -449,7 +463,7 @@ impl ActivityEconomicsResolver {
             };
         }
 
-        let performance_flow_value = Self::cash_or_legacy_flow_amount(activity);
+        let performance_flow_value = Self::gross_or_legacy_flow_amount(activity);
         let performance_flow_source = if performance_flow_value.is_zero() {
             ExternalFlowSource::Unknown
         } else {
@@ -570,9 +584,10 @@ impl ActivityEconomicsResolver {
         }
     }
 
-    fn cash_or_legacy_flow_amount(activity: &Activity) -> Decimal {
+    fn gross_or_legacy_flow_amount(activity: &Activity) -> Decimal {
         Self::resolve_cash(activity, Decimal::ONE)
-            .amount
+            .gross_amount
+            .or(activity.amount.map(|amount| amount.abs()))
             .unwrap_or(Decimal::ZERO)
     }
 
@@ -635,6 +650,27 @@ mod cash_tests {
         assert_eq!(sell.amount, Some(dec!(17)));
         assert_eq!(sell.signed_cash_effect, dec!(17));
         assert_eq!(sell.gross_amount, Some(dec!(20)));
+    }
+
+    #[test]
+    fn external_cash_flow_separates_final_cash_from_signed_gross() {
+        let mut deposit = inputs(ACTIVITY_TYPE_DEPOSIT);
+        deposit.quantity = None;
+        deposit.unit_price = None;
+        deposit.amount = Some(dec!(97));
+        let deposit = ActivityEconomicsResolver::resolve_cash_inputs(deposit);
+        assert_eq!(deposit.signed_cash_effect, dec!(97));
+        assert_eq!(deposit.gross_amount, Some(dec!(100)));
+        assert_eq!(deposit.signed_gross_effect(), dec!(100));
+
+        let mut withdrawal = inputs(ACTIVITY_TYPE_WITHDRAWAL);
+        withdrawal.quantity = None;
+        withdrawal.unit_price = None;
+        withdrawal.amount = Some(dec!(103));
+        let withdrawal = ActivityEconomicsResolver::resolve_cash_inputs(withdrawal);
+        assert_eq!(withdrawal.signed_cash_effect, dec!(-103));
+        assert_eq!(withdrawal.gross_amount, Some(dec!(100)));
+        assert_eq!(withdrawal.signed_gross_effect(), dec!(-100));
     }
 
     #[test]

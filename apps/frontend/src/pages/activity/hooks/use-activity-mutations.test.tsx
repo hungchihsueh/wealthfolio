@@ -124,7 +124,7 @@ describe("useActivityMutations", () => {
     );
   });
 
-  it("does not copy derived amounts when duplicating price-bearing activities", async () => {
+  it("preserves authoritative totals when duplicating price-bearing activities", async () => {
     const { result } = renderHook(() => useActivityMutations(), { wrapper: createWrapper() });
 
     await act(async () => {
@@ -146,7 +146,7 @@ describe("useActivityMutations", () => {
 
     expect(adapterMocks.createActivity).toHaveBeenCalledWith(
       expect.objectContaining({
-        amount: undefined,
+        amount: 200,
         quantity: 2,
         unitPrice: 100,
       }),
@@ -179,7 +179,7 @@ describe("useActivityMutations", () => {
 
     expect(adapterMocks.createActivity).toHaveBeenCalledWith(
       expect.objectContaining({
-        amount: undefined,
+        amount: "100",
         metadata: { contract_multiplier: 10 },
       }),
     );
