@@ -939,9 +939,8 @@ impl ActivityService {
     }
 
     fn transfer_abs_value(activity: &Activity) -> Option<Decimal> {
-        activity
-            .amount
-            .or_else(|| Some(activity.quantity? * activity.unit_price?))
+        ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE)
+            .gross_amount
             .map(|value| value.abs())
     }
 
@@ -6428,9 +6427,27 @@ impl ActivityService {
             })
         }
 
+        fn cash_transfer_gross_amount(activity: &ActivityImport) -> Option<Decimal> {
+            ActivityEconomicsResolver::resolve_cash_inputs(ActivityCashInputs {
+                activity_type: &activity.activity_type,
+                is_security_transfer: false,
+                quantity: activity.quantity,
+                unit_price: activity.unit_price,
+                amount: activity.amount,
+                fee: activity.fee,
+                tax: activity.tax,
+                unit_multiplier: Decimal::ONE,
+            })
+            .gross_amount
+        }
+
         fn transfer_match_key(activity: &ActivityImport) -> Option<TransferMatchKey> {
             let date = parse_activity_date(&activity.date)?;
-            let amount = transfer_amount(activity)?;
+            let amount = if is_cash_transfer_import(activity) {
+                cash_transfer_gross_amount(activity)?
+            } else {
+                transfer_amount(activity)?
+            };
             if amount.is_zero() {
                 return None;
             }
@@ -6507,8 +6524,8 @@ impl ActivityService {
                 return None;
             }
 
-            let destination_amount = transfer_amount(transfer_in)?.abs();
-            let source_amount = transfer_amount(transfer_out)?.abs();
+            let destination_amount = cash_transfer_gross_amount(transfer_in)?.abs();
+            let source_amount = cash_transfer_gross_amount(transfer_out)?.abs();
             if destination_amount.is_zero() || source_amount.is_zero() {
                 return None;
             }

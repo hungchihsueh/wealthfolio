@@ -9455,9 +9455,9 @@ mod tests {
             quantity: None,
             unit_price: None,
             currency: "USD".to_string(),
-            fee: Some(dec!(0)),
+            fee: Some(dec!(2)),
             tax: None,
-            amount: Some(dec!(500)),
+            amount: Some(dec!(502)),
             comment: Some("Internal transfer out".to_string()),
             account_id: Some("acc-2".to_string()),
             account_name: None,
@@ -9549,6 +9549,8 @@ mod tests {
             transfer_out_stored.source_group_id, transfer_in_stored.source_group_id,
             "paired transfers should share the same source_group_id"
         );
+        assert_eq!(transfer_out_stored.amount, Some(dec!(502)));
+        assert_eq!(transfer_in_stored.amount, Some(dec!(500)));
         assert_eq!(
             transfer_out_stored
                 .metadata
@@ -10115,14 +10117,16 @@ mod tests {
         let fx_service = Arc::new(MockFxService::new());
         let activity_repository = Arc::new(MockActivityRepository::new());
 
-        activity_repository.add_activity(create_cash_transfer_activity(
+        let mut source_out = create_cash_transfer_activity(
             "source-out",
             "acc-a",
             "TRANSFER_OUT",
             "2024-01-15T00:00:00Z",
-            dec!(100),
+            dec!(102),
             "USD",
-        ));
+        );
+        source_out.fee = Some(dec!(2));
+        activity_repository.add_activity(source_out);
         activity_repository.add_activity(create_cash_transfer_activity(
             "cash-match",
             "acc-b",

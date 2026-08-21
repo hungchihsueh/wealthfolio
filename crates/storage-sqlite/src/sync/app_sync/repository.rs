@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 
 use wealthfolio_core::activities::{
-    Activity, ACTIVITY_TYPE_BUY, ACTIVITY_TYPE_DIVIDEND, ACTIVITY_TYPE_INTEREST,
-    ACTIVITY_TYPE_SELL, ACTIVITY_TYPE_SPLIT,
+    compute_activity_idempotency_key, Activity, ACTIVITY_TYPE_BUY, ACTIVITY_TYPE_DIVIDEND,
+    ACTIVITY_TYPE_INTEREST, ACTIVITY_TYPE_SELL, ACTIVITY_TYPE_SPLIT,
 };
 use wealthfolio_core::assets::Asset;
 use wealthfolio_core::constants::DECIMAL_PRECISION;
@@ -505,6 +505,32 @@ fn activity_contract_multiplier(activity: &Activity) -> Option<Decimal> {
     .filter(|multiplier| *multiplier > Decimal::ZERO)
 }
 
+fn canonical_synced_activity_idempotency_key_tx(
+    conn: &mut SqliteConnection,
+    normalized: &Activity,
+    current_generated_key: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(current_key) = current_generated_key else {
+        return Ok(None);
+    };
+
+    let candidate = compute_activity_idempotency_key(normalized);
+    if candidate == current_key {
+        return Ok(None);
+    }
+
+    let owned_by_other = activities_table::table
+        .filter(activities_table::idempotency_key.eq(&candidate))
+        .filter(activities_table::id.ne(&normalized.id))
+        .select(activities_table::id)
+        .first::<String>(conn)
+        .optional()
+        .map_err(StorageError::from)?
+        .is_some();
+
+    Ok((!owned_by_other).then_some(candidate))
+}
+
 /// Canonicalize activity magnitudes after cross-version replay or snapshot restore.
 /// Older clients can write rows after the one-time startup migration has completed.
 fn normalize_synced_activity_cash_rows_tx(
@@ -553,6 +579,11 @@ fn normalize_synced_activity_cash_rows_tx(
     for row in rows {
         let activity_id = row.id.clone();
         let mut activity: Activity = row.into();
+        let generated_idempotency_key = activity
+            .idempotency_key
+            .as_ref()
+            .filter(|key| *key == &compute_activity_idempotency_key(&activity))
+            .cloned();
         let original = (
             activity.quantity,
             activity.unit_price,
@@ -605,6 +636,13 @@ fn normalize_synced_activity_cash_rows_tx(
             continue;
         }
 
+        let idempotency_key = canonical_synced_activity_idempotency_key_tx(
+            conn,
+            &activity,
+            generated_idempotency_key.as_deref(),
+        )?
+        .or_else(|| activity.idempotency_key.clone());
+
         diesel::update(activities_table::table.find(&activity_id))
             .set((
                 activities_table::quantity.eq(activity.quantity.map(|value| value.to_string())),
@@ -612,6 +650,7 @@ fn normalize_synced_activity_cash_rows_tx(
                 activities_table::amount.eq(activity.amount.map(|value| value.to_string())),
                 activities_table::fee.eq(activity.fee.map(|value| value.to_string())),
                 activities_table::tax.eq(activity.tax.map(|value| value.to_string())),
+                activities_table::idempotency_key.eq(idempotency_key),
             ))
             .execute(conn)
             .map_err(StorageError::from)?;
@@ -7980,6 +8019,7 @@ mod tests {
                     "fee": -0.5,
                     "tax": "-2.5e-1",
                     "currency": "USD",
+                    "idempotencyKey": "provider:signed-activity",
                     "isUserModified": 0,
                     "needsReview": 0,
                     "createdAt": "2026-02-15T00:00:00Z",
@@ -7999,8 +8039,10 @@ mod tests {
                 activities::amount,
                 activities::fee,
                 activities::tax,
+                activities::idempotency_key,
             ))
             .first::<(
+                Option<String>,
                 Option<String>,
                 Option<String>,
                 Option<String>,
@@ -8014,6 +8056,7 @@ mod tests {
         assert_eq!(stored.2.as_deref(), Some("12"));
         assert_eq!(stored.3.as_deref(), Some("0.5"));
         assert_eq!(stored.4.as_deref(), Some("0.25"));
+        assert_eq!(stored.5.as_deref(), Some("provider:signed-activity"));
     }
 
     #[tokio::test]
@@ -8026,6 +8069,22 @@ mod tests {
                 .expect("insert asset");
         }
         let repo = AppSyncRepository::new(pool.clone(), writer);
+        let activity_date = DateTime::parse_from_rfc3339("2026-02-14T00:00:00Z")
+            .expect("activity date")
+            .with_timezone(&Utc);
+        let legacy_idempotency_key = wealthfolio_core::activities::compute_idempotency_key(
+            "acc-missing-amount",
+            "BUY",
+            &activity_date,
+            Some("asset-missing-amount"),
+            Some(Decimal::from(2)),
+            Some(Decimal::new(55, 1)),
+            None,
+            Some(Decimal::new(5, 1)),
+            "USD",
+            None,
+            None,
+        );
 
         let applied = repo
             .apply_remote_event_lww(
@@ -8048,6 +8107,7 @@ mod tests {
                     "fee": -0.5,
                     "tax": "-0.25",
                     "currency": "USD",
+                    "idempotencyKey": legacy_idempotency_key.clone(),
                     "isUserModified": 0,
                     "needsReview": 0,
                     "createdAt": "2026-02-15T00:00:00Z",
@@ -8059,12 +8119,22 @@ mod tests {
         assert!(applied);
 
         let mut conn = get_connection(&pool).expect("conn");
-        let amount = activities::table
+        let stored = activities::table
             .find("activity-missing-amount")
-            .select(activities::amount)
-            .first::<Option<String>>(&mut conn)
-            .expect("load derived amount");
-        assert_eq!(amount.as_deref(), Some("11.75"));
+            .select(ActivityDB::as_select())
+            .first::<ActivityDB>(&mut conn)
+            .expect("load derived activity");
+        let stored: Activity = stored.into();
+        let canonical_idempotency_key = compute_activity_idempotency_key(&stored);
+        assert_eq!(stored.amount, Some(Decimal::new(1175, 2)));
+        assert_eq!(
+            stored.idempotency_key.as_deref(),
+            Some(canonical_idempotency_key.as_str())
+        );
+        assert_ne!(
+            stored.idempotency_key.as_deref(),
+            Some(legacy_idempotency_key.as_str())
+        );
     }
 
     #[tokio::test]
