@@ -5,7 +5,8 @@ import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { ActivityDetailSheet } from "./activity-detail-sheet";
 
-vi.mock("@wealthfolio/ui", () => ({
+vi.mock("@wealthfolio/ui", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@wealthfolio/ui")>()),
   Badge: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
   Button: ({ children }: { children: React.ReactNode }) => <button>{children}</button>,
   Icons: {
