@@ -7,7 +7,7 @@ use crate::activities::{
     is_cash_symbol, Activity, ACTIVITY_SUBTYPE_BONUS, ACTIVITY_TYPE_CREDIT, ACTIVITY_TYPE_DEPOSIT,
     ACTIVITY_TYPE_TRANSFER_IN, ACTIVITY_TYPE_TRANSFER_OUT, ACTIVITY_TYPE_WITHDRAWAL,
 };
-use crate::portfolio::economic_events::TransferBoundary;
+use crate::portfolio::economic_events::{ActivityEconomicsResolver, TransferBoundary};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
@@ -170,6 +170,12 @@ fn transfer_amount(activity: &Activity) -> Option<Decimal> {
         .map(|amount| amount.abs())
 }
 
+fn cash_transfer_gross_amount(activity: &Activity) -> Option<Decimal> {
+    ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE)
+        .gross_amount
+        .map(|amount| amount.abs())
+}
+
 fn decimal_matches(left: Option<Decimal>, right: Option<Decimal>) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => (left - right).abs() <= transfer_match_tolerance(),
@@ -205,7 +211,10 @@ fn transfer_match(activity: &Activity, candidate: &Activity) -> bool {
             && decimal_matches(transfer_amount(activity), transfer_amount(candidate))
     } else {
         activity.currency == candidate.currency
-            && decimal_matches(transfer_amount(activity), transfer_amount(candidate))
+            && decimal_matches(
+                cash_transfer_gross_amount(activity),
+                cash_transfer_gross_amount(candidate),
+            )
     }
 }
 
@@ -563,17 +572,18 @@ mod tests {
     }
 
     #[test]
-    fn unique_unlinked_transfer_pair_is_inferred_by_date_currency_and_amount() {
+    fn unique_unlinked_transfer_pair_is_inferred_by_date_currency_and_gross_amount() {
         let mut transfer_out = create_test_activity("TRANSFER_OUT");
         transfer_out.id = "out".to_string();
         transfer_out.activity_date = Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap();
-        transfer_out.amount = Some(rust_decimal::Decimal::from(250));
+        transfer_out.amount = Some(rust_decimal::Decimal::from(252));
+        transfer_out.fee = Some(rust_decimal::Decimal::from(2));
 
         let mut transfer_in = create_test_activity("TRANSFER_IN");
         transfer_in.id = "in".to_string();
         transfer_in.account_id = "account-2".to_string();
         transfer_in.activity_date = transfer_out.activity_date;
-        transfer_in.amount = transfer_out.amount;
+        transfer_in.amount = Some(rust_decimal::Decimal::from(250));
 
         let candidates = vec![transfer_out.clone(), transfer_in];
 
