@@ -21,6 +21,7 @@ describe("normalizeRecordActivitiesResult", () => {
               quantity: "2",
               unit_price: "200.5",
               amount: "401",
+              tax: "1.25",
               currency: "USD",
             },
             validation: {
@@ -45,6 +46,7 @@ describe("normalizeRecordActivitiesResult", () => {
     expect(normalized?.drafts[0].rowIndex).toBe(0);
     expect(normalized?.drafts[0].draft.activityType).toBe("BUY");
     expect(normalized?.drafts[0].draft.quantity).toBe(2);
+    expect(normalized?.drafts[0].draft.tax).toBe(1.25);
     expect(normalized?.validation.validRows).toBe(1);
     expect(normalized?.availableAccounts[0].id).toBe("acc-1");
   });
@@ -63,6 +65,7 @@ describe("buildRecordActivitiesCreatePayload", () => {
               symbol: "AAPL",
               quantity: 1,
               unitPrice: 100,
+              tax: 2,
               currency: "USD",
               accountId: "acc-1",
             },
@@ -108,6 +111,7 @@ describe("buildRecordActivitiesCreatePayload", () => {
     expect(creates[0].asset?.exchangeMic).toBe("XNAS");
     expect(creates[0].asset?.quoteCcy).toBe("USD");
     expect(creates[0].asset?.instrumentType).toBe("EQUITY");
+    expect(creates[0].tax).toBe(2);
     expect(rowIndexByTempId.get("record-activities-0")).toBe(0);
     expect(rowIndexByTempId.get("record-activities-1")).toBeUndefined();
   });

@@ -20,7 +20,7 @@ import {
   InternalTransferPairResponse,
 } from "@/lib/types";
 import { isSecuritiesTransfer } from "@/lib/activity-utils";
-import { ActivityType, InstrumentType, METADATA_CONTRACT_MULTIPLIER } from "@/lib/constants";
+import { ActivityType, METADATA_CONTRACT_MULTIPLIER } from "@/lib/constants";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { NewActivityFormValues } from "../components/forms/schemas";
@@ -343,12 +343,11 @@ export function useActivityMutations(
     const isBuyOrSell =
       restOfActivityData.activityType === ActivityType.BUY ||
       restOfActivityData.activityType === ActivityType.SELL;
-    const isBondTrade =
-      isBuyOrSell && activityToDuplicate.instrumentType?.toUpperCase() === InstrumentType.BOND;
-    const shouldCopyAmount =
-      isBondTrade ||
-      (!isBuyOrSell &&
-        !isSecuritiesTransfer(restOfActivityData.activityType, assetSymbol, _assetId));
+    const shouldCopyAmount = !isSecuritiesTransfer(
+      restOfActivityData.activityType,
+      assetSymbol,
+      _assetId,
+    );
     const supportsBoundary =
       restOfActivityData.activityType === ActivityType.CREDIT ||
       restOfActivityData.activityType === ActivityType.TRANSFER_IN ||

@@ -5323,6 +5323,27 @@ impl ActivityServiceTrait for ActivityService {
                 new_act.subtype.as_deref(),
             );
             Self::normalize_new_activity_economic_signs(new_act);
+            if new_act.amount.is_none() && new_act.activity_type != ACTIVITY_TYPE_SPLIT {
+                let transfer_asset_id = new_act.get_symbol_id().or_else(|| {
+                    let symbol = src.symbol.trim();
+                    (!symbol.is_empty()).then_some(symbol)
+                });
+                new_act.amount =
+                    ActivityEconomicsResolver::resolve_cash_inputs(ActivityCashInputs {
+                        activity_type: &new_act.activity_type,
+                        is_security_transfer: is_securities_transfer(
+                            &new_act.activity_type,
+                            transfer_asset_id,
+                        ),
+                        quantity: new_act.quantity,
+                        unit_price: new_act.unit_price,
+                        amount: None,
+                        fee: new_act.fee,
+                        tax: new_act.tax,
+                        unit_multiplier: self.import_cash_unit_multiplier(src),
+                    })
+                    .amount;
+            }
             new_act.idempotency_key = self.build_import_idempotency_key(src, &new_act.account_id);
         }
 

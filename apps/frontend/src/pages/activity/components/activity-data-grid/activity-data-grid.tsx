@@ -180,7 +180,8 @@ export function ActivityDataGrid({
       const isTrade =
         source.activityType === ActivityType.BUY || source.activityType === ActivityType.SELL;
       const shouldCalculateAmount =
-        isTrade || isAssetBackedIncomeSubtype(source.activityType, source.subtype);
+        source.amount == null &&
+        (isTrade || isAssetBackedIncomeSubtype(source.activityType, source.subtype));
       const duplicated = applyCalculatedTradeTotal({
         ...source,
         id: generateTempActivityId(),
@@ -188,7 +189,7 @@ export function ActivityDataGrid({
         createdAt: now,
         updatedAt: now,
         isNew: true,
-        amount: shouldCalculateAmount ? null : source.amount,
+        amount: source.amount,
         amountMode: shouldCalculateAmount ? "calculated" : "custom",
         comment: t("activity:datagrid.duplicated_comment"),
         idempotencyKey: generateId("manual-duplicate"),

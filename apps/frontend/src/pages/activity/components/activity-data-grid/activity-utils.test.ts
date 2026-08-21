@@ -483,6 +483,49 @@ describe("activity-utils", () => {
       expect(result.creates[0].idempotencyKey).toBe("manual-duplicate-123");
     });
 
+    it("should preserve only a custom multiplier for new trade duplicates", () => {
+      const transaction = createMockTransaction({
+        id: "temp-option-1",
+        isNew: true,
+        idempotencyKey: "manual-duplicate-option",
+        metadata: { contract_multiplier: 10, broker_reference: "do-not-copy" },
+      });
+
+      const result = buildSavePayload(
+        [transaction],
+        new Set([transaction.id]),
+        new Set(),
+        mockResolveTransactionCurrency,
+        dirtyCurrencyLookup,
+        assetCurrencyLookup,
+        "USD",
+      );
+
+      expect(JSON.parse(result.creates[0].metadata ?? "{}")).toEqual({
+        contract_multiplier: 10,
+      });
+    });
+
+    it("should persist a cleared multiplier override on existing rows", () => {
+      const transaction = createMockTransaction({
+        id: "existing-option-1",
+        isNew: false,
+        metadata: {},
+      });
+
+      const result = buildSavePayload(
+        [transaction],
+        new Set([transaction.id]),
+        new Set(),
+        mockResolveTransactionCurrency,
+        dirtyCurrencyLookup,
+        assetCurrencyLookup,
+        "USD",
+      );
+
+      expect(JSON.parse(result.updates[0].metadata ?? "missing")).toEqual({});
+    });
+
     it.each([true, false])(
       "should preserve only an explicit %s credit boundary for a new duplicate",
       (isExternal) => {
@@ -1051,7 +1094,7 @@ describe("activity-utils", () => {
       });
 
       expect(updated.contractMultiplier).toBeUndefined();
-      expect(updated.metadata).toBeUndefined();
+      expect(updated.metadata).toEqual({});
       expect(updated.amount).toBe("11");
     });
 

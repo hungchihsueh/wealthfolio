@@ -19,15 +19,15 @@ impl HoldingsCalculator {
         state: &mut AccountStateSnapshot,
         account_currency: &str,
     ) -> Result<()> {
-        let activity_amount =
-            ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE).signed_cash_effect;
+        let resolved = ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE);
+        let activity_amount = resolved.signed_cash_effect;
         let (cash_currency, cash_effect) =
             cash_booking(activity, account_currency, activity_amount);
         add_cash(state, &cash_currency, cash_effect);
 
         // Convert for net_contribution (pre-fee amount in account currency)
         let amount_acct = self.convert_to_account_currency(
-            activity_amount,
+            resolved.signed_gross_effect(),
             activity,
             account_currency,
             "Deposit Amount",
@@ -55,15 +55,15 @@ impl HoldingsCalculator {
         state: &mut AccountStateSnapshot,
         account_currency: &str,
     ) -> Result<()> {
-        let activity_amount =
-            ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE).signed_cash_effect;
+        let resolved = ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE);
+        let activity_amount = resolved.signed_cash_effect;
         let (cash_currency, cash_effect) =
             cash_booking(activity, account_currency, activity_amount);
         add_cash(state, &cash_currency, cash_effect);
 
         // Convert for net_contribution (pre-fee amount in account currency)
         let amount_acct = self.convert_to_account_currency(
-            activity_amount,
+            resolved.signed_gross_effect(),
             activity,
             account_currency,
             "Withdrawal Amount",
@@ -95,8 +95,8 @@ impl HoldingsCalculator {
         state: &mut AccountStateSnapshot,
         account_currency: &str,
     ) -> Result<()> {
-        let activity_amount =
-            ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE).signed_cash_effect;
+        let resolved = ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE);
+        let activity_amount = resolved.signed_cash_effect;
         let (cash_currency, cash_effect) =
             cash_booking(activity, account_currency, activity_amount);
         add_cash(state, &cash_currency, cash_effect);
@@ -104,7 +104,7 @@ impl HoldingsCalculator {
         if affects_net_contribution(activity) {
             // Convert to account currency for net_contribution
             let amount_acct = self.convert_to_account_currency(
-                activity_amount,
+                resolved.signed_gross_effect(),
                 activity,
                 account_currency,
                 "External Credit",

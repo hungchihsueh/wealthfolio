@@ -77,6 +77,7 @@ function normalizeDraft(raw: UnknownObject, fallbackCurrency: string): RecordAct
     unitPrice: pickNumber(raw, "unitPrice", "unit_price"),
     amount: toNumber(raw.amount),
     fee: toNumber(raw.fee),
+    tax: toNumber(raw.tax),
     currency: pickString(raw, "currency", "currency") ?? fallbackCurrency,
     accountId: pickString(raw, "accountId", "account_id"),
     accountName: pickString(raw, "accountName", "account_name"),
@@ -275,6 +276,7 @@ export function buildRecordActivitiesCreatePayload(rows: RecordActivitiesDraftRo
       unitPrice: row.draft.unitPrice,
       amount: row.draft.amount,
       fee: row.draft.fee,
+      tax: row.draft.tax,
       currency: row.draft.currency,
       comment: row.draft.notes ?? undefined,
     });

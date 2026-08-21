@@ -9,20 +9,29 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 
+use wealthfolio_core::activities::{
+    Activity, ACTIVITY_TYPE_BUY, ACTIVITY_TYPE_DIVIDEND, ACTIVITY_TYPE_INTEREST,
+    ACTIVITY_TYPE_SELL, ACTIVITY_TYPE_SPLIT,
+};
+use wealthfolio_core::assets::Asset;
 use wealthfolio_core::constants::DECIMAL_PRECISION;
 use wealthfolio_core::errors::{DatabaseError, Error, Result};
+use wealthfolio_core::portfolio::economic_events::ActivityEconomicsResolver;
 use wealthfolio_core::portfolio::snapshot::Position;
 use wealthfolio_core::sync::{
     should_apply_lww, SyncEngineStatus, SyncEntity, SyncEntityMetadata, SyncOperation,
     SyncOutboxEvent, SyncOutboxStatus, APP_SYNC_TABLES,
 };
 
+use crate::activities::ActivityDB;
 use crate::addons::addon_storage_id;
+use crate::assets::AssetDB;
 use crate::db::{get_connection, WriteHandle};
 use crate::errors::StorageError;
 use crate::schema::{
-    addon_storage, spending_preset_rule_deletions, sync_applied_events, sync_cursor,
-    sync_device_config, sync_engine_state, sync_entity_metadata, sync_outbox, sync_table_state,
+    activities as activities_table, addon_storage, assets as assets_table,
+    spending_preset_rule_deletions, sync_applied_events, sync_cursor, sync_device_config,
+    sync_engine_state, sync_entity_metadata, sync_outbox, sync_table_state,
 };
 use crate::spending::deterministic_ids::preset_rule_deletion_id;
 use crate::sync::broker_activity_patch::{
@@ -484,6 +493,131 @@ fn migrate_activity_magnitude_value(value: serde_json::Value) -> serde_json::Val
         }
         _ => value,
     }
+}
+
+fn activity_contract_multiplier(activity: &Activity) -> Option<Decimal> {
+    let value = activity.metadata.as_ref()?.get("contract_multiplier")?;
+    match value {
+        serde_json::Value::String(raw) => raw.parse::<Decimal>().ok(),
+        serde_json::Value::Number(raw) => raw.to_string().parse::<Decimal>().ok(),
+        _ => None,
+    }
+    .filter(|multiplier| *multiplier > Decimal::ZERO)
+}
+
+/// Canonicalize activity magnitudes after cross-version replay or snapshot restore.
+/// Older clients can write rows after the one-time startup migration has completed.
+fn normalize_synced_activity_cash_rows_tx(
+    conn: &mut SqliteConnection,
+    activity_ids: Option<&[String]>,
+) -> Result<()> {
+    if activity_ids.is_some_and(|ids| ids.is_empty()) {
+        return Ok(());
+    }
+
+    let mut query = activities_table::table.into_boxed();
+    if let Some(ids) = activity_ids {
+        query = query.filter(activities_table::id.eq_any(ids));
+    } else {
+        query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+            USER_SYNCABLE_ACTIVITIES_FILTER_SQL,
+        ));
+    }
+    let rows = query
+        .select(ActivityDB::as_select())
+        .load::<ActivityDB>(conn)
+        .map_err(StorageError::from)?;
+
+    let asset_ids = rows
+        .iter()
+        .filter_map(|row| row.asset_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let asset_multipliers = if asset_ids.is_empty() {
+        HashMap::new()
+    } else {
+        assets_table::table
+            .filter(assets_table::id.eq_any(asset_ids))
+            .select(AssetDB::as_select())
+            .load::<AssetDB>(conn)
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(|row| {
+                let asset: Asset = row.into();
+                (asset.id.clone(), asset.contract_multiplier())
+            })
+            .collect::<HashMap<_, _>>()
+    };
+
+    for row in rows {
+        let activity_id = row.id.clone();
+        let mut activity: Activity = row.into();
+        let original = (
+            activity.quantity,
+            activity.unit_price,
+            activity.amount,
+            activity.fee,
+            activity.tax,
+        );
+
+        activity.quantity = activity.quantity.map(|value| value.abs());
+        activity.unit_price = activity.unit_price.map(|value| value.abs());
+        activity.fee = activity.fee.map(|value| value.abs());
+        activity.tax = activity.tax.map(|value| value.abs());
+        activity.amount = activity.amount.map(|value| value.abs());
+
+        if activity.amount.is_none()
+            && activity.effective_type() != ACTIVITY_TYPE_SPLIT
+            && !ActivityEconomicsResolver::is_security_transfer(&activity)
+        {
+            let requires_asset_multiplier = matches!(
+                activity.effective_type(),
+                ACTIVITY_TYPE_BUY
+                    | ACTIVITY_TYPE_SELL
+                    | ACTIVITY_TYPE_DIVIDEND
+                    | ACTIVITY_TYPE_INTEREST
+            ) && activity.quantity.is_some()
+                && activity.unit_price.is_some();
+            let multiplier = activity_contract_multiplier(&activity).or_else(|| {
+                activity
+                    .asset_id
+                    .as_ref()
+                    .and_then(|asset_id| asset_multipliers.get(asset_id).copied())
+            });
+            if !requires_asset_multiplier || multiplier.is_some() {
+                activity.amount = ActivityEconomicsResolver::resolve_cash(
+                    &activity,
+                    multiplier.unwrap_or(Decimal::ONE),
+                )
+                .amount;
+            }
+        }
+
+        let normalized = (
+            activity.quantity,
+            activity.unit_price,
+            activity.amount,
+            activity.fee,
+            activity.tax,
+        );
+        if original == normalized {
+            continue;
+        }
+
+        diesel::update(activities_table::table.find(&activity_id))
+            .set((
+                activities_table::quantity.eq(activity.quantity.map(|value| value.to_string())),
+                activities_table::unit_price.eq(activity.unit_price.map(|value| value.to_string())),
+                activities_table::amount.eq(activity.amount.map(|value| value.to_string())),
+                activities_table::fee.eq(activity.fee.map(|value| value.to_string())),
+                activities_table::tax.eq(activity.tax.map(|value| value.to_string())),
+            ))
+            .execute(conn)
+            .map_err(StorageError::from)?;
+    }
+
+    Ok(())
 }
 
 fn migrate_legacy_goal_lifecycle_value(value: serde_json::Value) -> serde_json::Value {
@@ -2719,7 +2853,7 @@ impl AppSyncRepository {
     ) -> Result<bool> {
         self.writer
             .exec(move |conn| {
-                apply_remote_event_lww_tx(
+                let applied = apply_remote_event_lww_tx(
                     conn,
                     entity,
                     entity_id_value.clone(),
@@ -2738,7 +2872,14 @@ impl AppSyncRepository {
                         seq_value,
                         err,
                     )
-                })
+                })?;
+                if applied && entity == SyncEntity::Activity && op != SyncOperation::Delete {
+                    normalize_synced_activity_cash_rows_tx(
+                        conn,
+                        Some(std::slice::from_ref(&entity_id_value)),
+                    )?;
+                }
+                Ok(applied)
             })
             .await
     }
@@ -2782,9 +2923,10 @@ impl AppSyncRepository {
                     }
 
                     let mut applied = 0usize;
+                    let mut activity_ids = HashSet::new();
                     for (entity, entity_id, op, event_id, client_timestamp, seq, payload) in events
                     {
-                        if apply_remote_event_lww_tx(
+                        let event_applied = apply_remote_event_lww_tx(
                             conn,
                             entity,
                             entity_id.clone(),
@@ -2796,10 +2938,16 @@ impl AppSyncRepository {
                         )
                         .map_err(|err| {
                             replay_apply_error(entity, &entity_id, op, &event_id, seq, err)
-                        })? {
+                        })?;
+                        if event_applied {
                             applied += 1;
+                            if entity == SyncEntity::Activity && op != SyncOperation::Delete {
+                                activity_ids.insert(entity_id);
+                            }
                         }
                     }
+                    let activity_ids = activity_ids.into_iter().collect::<Vec<_>>();
+                    normalize_synced_activity_cash_rows_tx(conn, Some(&activity_ids))?;
                     ensure_no_foreign_key_violations_tx(conn, fk_check_tables.iter().copied())?;
                     Ok(applied)
                 })();
@@ -3369,6 +3517,9 @@ impl AppSyncRepository {
                             ))
                             .execute(conn)
                             .map_err(StorageError::from)?;
+                    }
+                    if table_set_lookup.contains("activities") {
+                        normalize_synced_activity_cash_rows_tx(conn, None)?;
                     }
                     ensure_no_foreign_key_violations_tx(
                         conn,
@@ -3958,6 +4109,35 @@ mod tests {
         let pool = create_pool(&db_path).expect("create pool");
         let mut conn = get_connection(&pool).expect("conn");
         insert_account_for_test(&mut conn, account_id).expect("insert account");
+        db_path
+    }
+
+    fn create_snapshot_db_with_legacy_activity(account_id: &str, activity_id: &str) -> String {
+        let app_data = tempdir()
+            .expect("tempdir")
+            .keep()
+            .to_string_lossy()
+            .to_string();
+        let db_path = init(&app_data).expect("init db");
+        run_migrations(&db_path).expect("migrate db");
+        let pool = create_pool(&db_path).expect("create pool");
+        let mut conn = get_connection(&pool).expect("conn");
+        insert_account_for_test(&mut conn, account_id).expect("insert account");
+        insert_asset_kind_for_test(&mut conn, "asset-legacy-buy", "INVESTMENT")
+            .expect("insert asset");
+        let sql = format!(
+            "INSERT INTO activities \
+             (id, account_id, asset_id, activity_type, status, activity_date, quantity, unit_price, \
+              amount, fee, tax, currency, source_system, is_user_modified, needs_review, created_at, updated_at) \
+             VALUES ('{}', '{}', 'asset-legacy-buy', 'BUY', 'POSTED', \
+                     '2026-01-01T00:00:00Z', '-2', '-5', NULL, '-1', '-0.5', 'USD', 'MANUAL', 1, 0, \
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            escape_sqlite_str(activity_id),
+            escape_sqlite_str(account_id),
+        );
+        diesel::sql_query(sql)
+            .execute(&mut conn)
+            .expect("insert legacy activity");
         db_path
     }
 
@@ -5016,6 +5196,53 @@ mod tests {
 
         assert_eq!(repo.get_cursor().expect("cursor"), 88);
         assert_eq!(count_account_rows(&pool, "acc-from-snapshot"), 1);
+    }
+
+    #[tokio::test]
+    async fn snapshot_restore_normalizes_and_derives_legacy_activity_amounts() {
+        let (pool, writer) = setup_db();
+        let repo = AppSyncRepository::new(pool.clone(), writer);
+        let snapshot_path =
+            create_snapshot_db_with_legacy_activity("acc-legacy-snapshot", "activity-legacy");
+
+        repo.restore_snapshot_tables_from_file(
+            snapshot_path,
+            vec![
+                "accounts".to_string(),
+                "assets".to_string(),
+                "activities".to_string(),
+            ],
+            89,
+            "device-legacy".to_string(),
+            Some(1),
+        )
+        .await
+        .expect("restore legacy activity snapshot");
+
+        let mut conn = get_connection(&pool).expect("conn");
+        let stored = activities::table
+            .find("activity-legacy")
+            .select((
+                activities::quantity,
+                activities::unit_price,
+                activities::amount,
+                activities::fee,
+                activities::tax,
+            ))
+            .first::<(
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            )>(&mut conn)
+            .expect("load restored activity");
+
+        assert_eq!(stored.0.as_deref(), Some("2"));
+        assert_eq!(stored.1.as_deref(), Some("5"));
+        assert_eq!(stored.2.as_deref(), Some("11.5"));
+        assert_eq!(stored.3.as_deref(), Some("1"));
+        assert_eq!(stored.4.as_deref(), Some("0.5"));
     }
 
     #[tokio::test]
@@ -7787,6 +8014,57 @@ mod tests {
         assert_eq!(stored.2.as_deref(), Some("12"));
         assert_eq!(stored.3.as_deref(), Some("0.5"));
         assert_eq!(stored.4.as_deref(), Some("0.25"));
+    }
+
+    #[tokio::test]
+    async fn replay_derives_missing_activity_amount_after_asset_replay() {
+        let (pool, writer) = setup_db();
+        {
+            let mut conn = get_connection(&pool).expect("conn");
+            insert_account_for_test(&mut conn, "acc-missing-amount").expect("insert account");
+            insert_asset_kind_for_test(&mut conn, "asset-missing-amount", "INVESTMENT")
+                .expect("insert asset");
+        }
+        let repo = AppSyncRepository::new(pool.clone(), writer);
+
+        let applied = repo
+            .apply_remote_event_lww(
+                SyncEntity::Activity,
+                "activity-missing-amount".to_string(),
+                SyncOperation::Create,
+                "evt-missing-amount".to_string(),
+                "2026-02-15T00:00:00Z".to_string(),
+                1,
+                serde_json::json!({
+                    "id": "activity-missing-amount",
+                    "accountId": "acc-missing-amount",
+                    "assetId": "asset-missing-amount",
+                    "activityType": "BUY",
+                    "status": "POSTED",
+                    "activityDate": "2026-02-14",
+                    "quantity": "-2",
+                    "unitPrice": "-5.5",
+                    "amount": null,
+                    "fee": -0.5,
+                    "tax": "-0.25",
+                    "currency": "USD",
+                    "isUserModified": 0,
+                    "needsReview": 0,
+                    "createdAt": "2026-02-15T00:00:00Z",
+                    "updatedAt": "2026-02-15T00:00:00Z"
+                }),
+            )
+            .await
+            .expect("apply activity with missing amount");
+        assert!(applied);
+
+        let mut conn = get_connection(&pool).expect("conn");
+        let amount = activities::table
+            .find("activity-missing-amount")
+            .select(activities::amount)
+            .first::<Option<String>>(&mut conn)
+            .expect("load derived amount");
+        assert_eq!(amount.as_deref(), Some("11.75"));
     }
 
     #[tokio::test]

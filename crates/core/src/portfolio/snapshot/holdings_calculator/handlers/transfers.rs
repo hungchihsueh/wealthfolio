@@ -88,8 +88,8 @@ impl HoldingsCalculator {
         buffer: &mut SideEffectBuffer,
     ) -> Result<()> {
         let activity_currency = &activity.currency;
-        let activity_amount =
-            ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE).signed_cash_effect;
+        let resolved = ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE);
+        let activity_amount = resolved.signed_cash_effect;
         let asset_id = activity.asset_id.as_deref().unwrap_or("");
 
         if asset_id.is_empty() || is_cash_symbol(asset_id) {
@@ -98,7 +98,7 @@ impl HoldingsCalculator {
             add_cash(state, &cash_currency, cash_effect);
 
             let amount_acct = self.convert_to_account_currency(
-                activity_amount,
+                resolved.signed_gross_effect(),
                 activity,
                 account_currency,
                 "TransferIn Cash",
@@ -393,8 +393,8 @@ impl HoldingsCalculator {
         run: &ProjectionRun,
         buffer: &mut SideEffectBuffer,
     ) -> Result<()> {
-        let activity_amount =
-            ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE).signed_cash_effect;
+        let resolved = ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE);
+        let activity_amount = resolved.signed_cash_effect;
         let asset_id = activity.asset_id.as_deref().unwrap_or("");
 
         if asset_id.is_empty() || is_cash_symbol(asset_id) {
@@ -403,7 +403,7 @@ impl HoldingsCalculator {
             add_cash(state, &cash_currency, cash_effect);
 
             let amount_acct = self.convert_to_account_currency(
-                activity_amount,
+                resolved.signed_gross_effect(),
                 activity,
                 account_currency,
                 "TransferOut Cash",
