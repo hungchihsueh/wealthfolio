@@ -12,7 +12,7 @@ use wealthfolio_connect::{
 };
 use wealthfolio_core::{
     accounts::AccountService,
-    activities::{run_activity_cash_amount_v4, ActivityService},
+    activities::{run_activity_cash_amount_v3_8, ActivityService},
     addons::AddonService,
     assets::{AlternativeAssetService, AssetClassificationService, AssetService},
     events::DomainEvent,
@@ -426,7 +426,7 @@ pub async fn initialize_context(
         .with_lot_repository(lots_repository.clone()),
     );
 
-    run_activity_cash_amount_v4(
+    run_activity_cash_amount_v3_8(
         settings_service.as_ref(),
         activity_service.as_ref(),
         account_service.as_ref(),

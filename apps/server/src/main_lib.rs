@@ -18,7 +18,7 @@ use wealthfolio_core::addons::{AddonService, AddonServiceTrait};
 use wealthfolio_core::{
     accounts::{AccountService, AccountServiceTrait},
     activities::{
-        run_activity_cash_amount_v4, ActivityService as CoreActivityService, ActivityServiceTrait,
+        run_activity_cash_amount_v3_8, ActivityService as CoreActivityService, ActivityServiceTrait,
     },
     assets::{
         AlternativeAssetRepositoryTrait, AlternativeAssetService, AlternativeAssetServiceTrait,
@@ -560,7 +560,7 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         .with_timezone(timezone.clone())
         .with_event_sink(domain_event_sink.clone()),
     );
-    run_activity_cash_amount_v4(
+    run_activity_cash_amount_v3_8(
         settings_service.as_ref(),
         activity_service.as_ref(),
         account_service.as_ref(),
