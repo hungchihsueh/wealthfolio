@@ -248,6 +248,9 @@ async function createApiTradeActivity(
     tax: number;
   },
 ): Promise<ActivityPayload> {
+  const grossAmount = activity.quantity * activity.unitPrice;
+  const charges = activity.fee + activity.tax;
+
   return apiPost<ActivityPayload>(page, "/activities", {
     id: activity.id,
     accountId: activity.accountId,
@@ -262,7 +265,7 @@ async function createApiTradeActivity(
     },
     quantity: activity.quantity,
     unitPrice: activity.unitPrice,
-    amount: activity.quantity * activity.unitPrice,
+    amount: activity.activityType === "BUY" ? grossAmount + charges : grossAmount - charges,
     currency: "USD",
     fee: activity.fee,
     tax: activity.tax,
