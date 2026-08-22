@@ -33,9 +33,10 @@ import { generateTempActivityId } from "./use-activity-grid-state";
 const NUMERIC_FIELDS = new Set(["quantity", "unitPrice", "amount", "fee", "tax", "fxRate"]);
 
 export function clearContractMultiplierOverride(
-  metadata: Record<string, unknown> | undefined,
+  metadata: Record<string, unknown> | null | undefined,
 ): Record<string, unknown> | undefined {
-  if (!metadata || !(METADATA_CONTRACT_MULTIPLIER in metadata)) return metadata;
+  if (!metadata) return undefined;
+  if (!(METADATA_CONTRACT_MULTIPLIER in metadata)) return metadata;
   const updated = { ...metadata };
   delete updated[METADATA_CONTRACT_MULTIPLIER];
   return updated;
@@ -532,11 +533,12 @@ export function buildSavePayload(
     // Existing edits must send metadata so cleared overrides replace the stored value.
     // New duplicates copy only supported user-owned metadata, not provider fields.
     let metadataJson: string | undefined;
-    const hasExistingMetadata = !isNew && typeof transaction.metadata === "object";
+    const hasExistingMetadata =
+      !isNew && transaction.metadata != null && typeof transaction.metadata === "object";
     const metadataForPayload: Record<string, unknown> = hasExistingMetadata
       ? { ...transaction.metadata }
       : {};
-    if (isNew && typeof transaction.metadata === "object") {
+    if (isNew && transaction.metadata != null && typeof transaction.metadata === "object") {
       const multiplier = Number(transaction.metadata[METADATA_CONTRACT_MULTIPLIER]);
       if (Number.isFinite(multiplier) && multiplier > 0) {
         metadataForPayload[METADATA_CONTRACT_MULTIPLIER] = multiplier;

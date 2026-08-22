@@ -400,7 +400,7 @@ export function MobileActivityForm({
       quoteMode:
         activity?.assetQuoteMode === QuoteMode.MANUAL ? QuoteMode.MANUAL : QuoteMode.MARKET,
       exchangeMic: activity?.exchangeMic,
-      metadata: activity?.metadata,
+      metadata: activity?.metadata ?? undefined,
       assetContractMultiplier: activity
         ? getContractMultiplier(activity as ActivityDetails)
         : undefined,

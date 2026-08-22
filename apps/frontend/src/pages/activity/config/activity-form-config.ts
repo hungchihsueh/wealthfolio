@@ -142,7 +142,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
         currency: activity?.currency,
         fxRate: activity?.fxRate ?? undefined,
         exchangeMic: activity?.exchangeMic,
-        activityMetadata: activity?.metadata,
+        activityMetadata: activity?.metadata ?? undefined,
         assetContractMultiplier: activity ? getContractMultiplier(activity) : undefined,
       };
 
@@ -237,7 +237,7 @@ export const ACTIVITY_FORM_CONFIG: Record<
         currency: activity?.currency,
         fxRate: activity?.fxRate ?? undefined,
         exchangeMic: activity?.exchangeMic,
-        activityMetadata: activity?.metadata,
+        activityMetadata: activity?.metadata ?? undefined,
         assetContractMultiplier: activity ? getContractMultiplier(activity) : undefined,
       };
 
