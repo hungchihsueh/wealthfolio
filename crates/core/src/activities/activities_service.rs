@@ -48,8 +48,8 @@ type SymbolResolutionKey = (String, String, Option<String>);
 use uuid::Uuid;
 use wealthfolio_market_data::mic_to_currency;
 
-mod activity_cash_amount_v4;
-pub use activity_cash_amount_v4::run_activity_cash_amount_v4;
+mod activity_cash_amount_v3_8;
+pub use activity_cash_amount_v3_8::run_activity_cash_amount_v3_8;
 
 /// A TRANSFER_IN/TRANSFER_OUT that moves a security (not cash). The monetary
 /// value of such an activity is always `quantity × unit_price`; the DB column
@@ -4046,7 +4046,7 @@ impl ActivityServiceTrait for ActivityService {
     }
 
     async fn migrate_activity_cash_amounts(&self) -> Result<usize> {
-        activity_cash_amount_v4::migrate_amounts(self).await
+        activity_cash_amount_v3_8::migrate_amounts(self).await
     }
 
     /// Retrieves activities by account ID

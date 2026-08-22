@@ -27,16 +27,16 @@ use crate::{
     settings::SettingsServiceTrait,
 };
 
-const MIGRATION_KEY: &str = "migration.activity_cash_amount.v4";
+const MIGRATION_KEY: &str = "migration.activity_cash_amount.v3.8";
 const PENDING: &str = "rebuild_pending";
 const COMPLETE: &str = "complete";
 
-/// Runs the v4 cash amount migration without propagating failures to startup.
+/// Runs the v3.8 cash amount migration without propagating failures to startup.
 ///
 /// A failed attempt is never marked complete and is retried on the next startup.
 /// The return value reports whether the migration was already complete or
 /// completed successfully during this call.
-pub async fn run_activity_cash_amount_v4(
+pub async fn run_activity_cash_amount_v3_8(
     settings_service: &dyn SettingsServiceTrait,
     activity_service: &dyn ActivityServiceTrait,
     account_service: &dyn AccountServiceTrait,
