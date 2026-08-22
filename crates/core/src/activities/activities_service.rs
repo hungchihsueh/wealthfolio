@@ -15,7 +15,7 @@ use crate::activities::activities_constants::{
 use crate::activities::activities_errors::ActivityError;
 use crate::activities::activities_model::*;
 use crate::activities::csv_parser::{self, ParseConfig, ParsedCsvResult};
-use crate::activities::idempotency::{compute_activity_idempotency_key, compute_idempotency_key};
+use crate::activities::idempotency::compute_idempotency_key;
 use crate::activities::{
     ActivityRepositoryTrait, ActivityServiceTrait, TransferPair, TransferPairResolution,
 };
@@ -47,6 +47,9 @@ type QuoteCcyCache = HashMap<(String, Option<String>, Option<String>), Option<St
 type SymbolResolutionKey = (String, String, Option<String>);
 use uuid::Uuid;
 use wealthfolio_market_data::mic_to_currency;
+
+mod activity_cash_amount_v4;
+pub use activity_cash_amount_v4::run_activity_cash_amount_v4;
 
 /// A TRANSFER_IN/TRANSFER_OUT that moves a security (not cash). The monetary
 /// value of such an activity is always `quantity × unit_price`; the DB column
@@ -201,56 +204,6 @@ impl ActivityService {
             .and_then(|asset_id| self.asset_service.get_asset_by_id(asset_id).ok())
             .map(|asset| asset.contract_multiplier())
             .unwrap_or(Decimal::ONE)
-    }
-
-    fn migration_cash_unit_multiplier(
-        &self,
-        activity: &Activity,
-        asset_multipliers: &mut HashMap<String, Option<Decimal>>,
-    ) -> Option<Decimal> {
-        let requires_asset_multiplier = matches!(
-            activity.effective_type(),
-            ACTIVITY_TYPE_BUY
-                | ACTIVITY_TYPE_SELL
-                | ACTIVITY_TYPE_DIVIDEND
-                | ACTIVITY_TYPE_INTEREST
-        ) && activity.quantity.is_some()
-            && activity.unit_price.is_some();
-        if !requires_asset_multiplier {
-            return Some(Decimal::ONE);
-        }
-
-        if let Some(multiplier) = activity
-            .metadata
-            .as_ref()
-            .and_then(Self::contract_multiplier_from_metadata)
-        {
-            return Some(multiplier);
-        }
-        let asset_id = activity.asset_id.as_deref()?;
-        if let Some(multiplier) = asset_multipliers.get(asset_id) {
-            return *multiplier;
-        }
-        let multiplier = self
-            .asset_service
-            .get_asset_by_id(asset_id)
-            .ok()
-            .map(|asset| asset.contract_multiplier());
-        asset_multipliers.insert(asset_id.to_string(), multiplier);
-        multiplier
-    }
-
-    fn should_reconcile_migrated_broker_trade(activity: &Activity) -> bool {
-        !activity.is_user_modified
-            && matches!(
-                activity.effective_type(),
-                ACTIVITY_TYPE_BUY | ACTIVITY_TYPE_SELL
-            )
-            && activity
-                .source_system
-                .as_deref()
-                .is_some_and(|source| source.eq_ignore_ascii_case("SNAPTRADE"))
-            && activity.fx_rate.is_none_or(|rate| rate == Decimal::ONE)
     }
 
     fn import_cash_unit_multiplier(&self, activity: &ActivityImport) -> Decimal {
@@ -4093,115 +4046,7 @@ impl ActivityServiceTrait for ActivityService {
     }
 
     async fn migrate_activity_cash_amounts(&self) -> Result<usize> {
-        let activities = self
-            .activity_repository
-            .get_activities_for_cash_amount_migration()?;
-        let existing_key_owner: HashMap<String, String> = activities
-            .iter()
-            .filter_map(|activity| {
-                activity
-                    .idempotency_key
-                    .as_ref()
-                    .map(|key| (key.clone(), activity.id.clone()))
-            })
-            .collect();
-        let mut claimed_recomputed_keys = HashSet::new();
-        let mut asset_multipliers = HashMap::new();
-        let mut updates = Vec::new();
-        let mut changed_activities = Vec::new();
-
-        for activity in activities {
-            if activity.effective_type() == ACTIVITY_TYPE_SPLIT
-                || ActivityEconomicsResolver::is_security_transfer(&activity)
-            {
-                continue;
-            }
-
-            let migrated_amount = if let Some(amount) = activity.amount {
-                let magnitude = amount.abs();
-                let reconciled = if Self::should_reconcile_migrated_broker_trade(&activity) {
-                    self.migration_cash_unit_multiplier(&activity, &mut asset_multipliers)
-                        .and_then(|unit_multiplier| {
-                            ActivityEconomicsResolver::reconcile_imported_trade_amount(
-                                ActivityCashInputs {
-                                    activity_type: activity.effective_type(),
-                                    is_security_transfer: false,
-                                    quantity: activity.quantity,
-                                    unit_price: activity.unit_price,
-                                    amount: Some(magnitude),
-                                    fee: activity.fee,
-                                    tax: activity.tax,
-                                    unit_multiplier,
-                                },
-                                currency_rounding_tolerance(&activity.currency),
-                            )
-                        })
-                        .unwrap_or(magnitude)
-                } else {
-                    magnitude
-                };
-                (reconciled != amount).then_some(reconciled)
-            } else {
-                self.migration_cash_unit_multiplier(&activity, &mut asset_multipliers)
-                    .and_then(|multiplier| {
-                        ActivityEconomicsResolver::resolve_cash(&activity, multiplier).amount
-                    })
-                    .filter(|amount| *amount > Decimal::ZERO)
-            };
-
-            if let Some(amount) = migrated_amount {
-                let idempotency_key = activity.idempotency_key.as_ref().and_then(|key| {
-                    if key != &compute_activity_idempotency_key(&activity) {
-                        return None;
-                    }
-                    let candidate = {
-                        let mut migrated = activity.clone();
-                        migrated.amount = Some(amount);
-                        compute_activity_idempotency_key(&migrated)
-                    };
-                    let owned_by_other = existing_key_owner
-                        .get(&candidate)
-                        .is_some_and(|owner| owner != &activity.id);
-                    if owned_by_other || !claimed_recomputed_keys.insert(candidate.clone()) {
-                        None
-                    } else {
-                        Some(candidate)
-                    }
-                });
-                updates.push(ActivityAmountUpdate {
-                    id: activity.id.clone(),
-                    amount,
-                    idempotency_key,
-                });
-                changed_activities.push(activity);
-            }
-        }
-
-        let changed = self
-            .activity_repository
-            .update_activity_amounts_for_migration(updates)
-            .await?;
-        if changed > 0 {
-            let mut account_ids = HashSet::new();
-            let mut asset_ids = HashSet::new();
-            let mut currencies = HashSet::new();
-            for activity in &changed_activities {
-                Self::add_activity_to_event_sets(
-                    activity,
-                    &mut account_ids,
-                    &mut asset_ids,
-                    &mut currencies,
-                );
-            }
-            self.emit_activities_changed(
-                account_ids.into_iter().collect(),
-                asset_ids.into_iter().collect(),
-                currencies.into_iter().collect(),
-                Self::earliest_activity_at_utc(&changed_activities),
-            );
-        }
-
-        Ok(changed)
+        activity_cash_amount_v4::migrate_amounts(self).await
     }
 
     /// Retrieves activities by account ID

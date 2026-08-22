@@ -33,7 +33,7 @@ pub use activities_model::{
     NewActivity, PrepareActivitiesResult, SaveBrokerSyncProfileRulesRequest, Sort, TemplateKind,
     TransferMatchCandidate, TransferMatchCandidateRequest,
 };
-pub use activities_service::ActivityService;
+pub use activities_service::{run_activity_cash_amount_v4, ActivityService};
 pub use activities_traits::{ActivityRepositoryTrait, ActivityServiceTrait};
 pub use compiler::{ActivityCompiler, DefaultActivityCompiler};
 pub use csv_parser::{parse_csv, ParseConfig, ParseError, ParsedCsvResult};
