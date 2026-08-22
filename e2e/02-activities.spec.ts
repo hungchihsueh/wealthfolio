@@ -568,7 +568,7 @@ test.describe("Activity Creation Tests", () => {
     await selectAccount(dividend.account, dividend.currency);
     await searchAndSelectSymbol(dividend.symbol);
     await selectDate();
-    await fillAmount(dividend.amount);
+    await fillAmount(dividend.amount, "dividend-amount-input");
     await fillNotes(dividend.notes);
 
     await submitActivity("Dividend");
@@ -774,7 +774,7 @@ test.describe("Activity Creation Tests", () => {
     const interest = TEST_DATA.activities.interest;
     await selectAccount(interest.account, interest.currency);
     await selectDate();
-    await fillAmount(interest.amount);
+    await fillAmount(interest.amount, "interest-amount-input");
     await fillNotes(interest.notes);
 
     await submitActivity("Interest");
