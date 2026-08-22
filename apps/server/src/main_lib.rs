@@ -558,7 +558,7 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         .with_timezone(timezone.clone())
         .with_event_sink(domain_event_sink.clone()),
     );
-    const ACTIVITY_CASH_AMOUNT_MIGRATION_KEY: &str = "migration.activity_cash_amount.v3";
+    const ACTIVITY_CASH_AMOUNT_MIGRATION_KEY: &str = "migration.activity_cash_amount.v4";
     if settings_service
         .get_setting_value(ACTIVITY_CASH_AMOUNT_MIGRATION_KEY)?
         .as_deref()

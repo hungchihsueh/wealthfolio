@@ -4,7 +4,10 @@ import {
   validateTransferFields,
   type TransferValidationInput,
 } from "../mobile-activity-form";
-import { getMobileActivityAssetId } from "../mobile-activity-utils";
+import {
+  allocateInternalSecurityTransferFee,
+  getMobileActivityAssetId,
+} from "../mobile-activity-utils";
 
 const base: TransferValidationInput = {
   activityType: "TRANSFER_OUT",
@@ -232,6 +235,26 @@ describe("validateTransferFields", () => {
         amount: null,
       });
       expect(outResult).toEqual(inResult);
+    });
+  });
+});
+
+describe("allocateInternalSecurityTransferFee", () => {
+  it("charges only the outgoing leg for a new internal transfer", () => {
+    expect(allocateInternalSecurityTransferFee(2.5)).toEqual({
+      transferOutFee: 2.5,
+      transferInFee: undefined,
+    });
+  });
+
+  it("updates only the leg that was opened", () => {
+    expect(allocateInternalSecurityTransferFee(3, "TRANSFER_OUT")).toEqual({
+      transferOutFee: 3,
+      transferInFee: undefined,
+    });
+    expect(allocateInternalSecurityTransferFee(4, "TRANSFER_IN")).toEqual({
+      transferOutFee: undefined,
+      transferInFee: 4,
     });
   });
 });

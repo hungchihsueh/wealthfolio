@@ -203,7 +203,11 @@ impl ActivityService {
             .unwrap_or(Decimal::ONE)
     }
 
-    fn migration_cash_unit_multiplier(&self, activity: &Activity) -> Option<Decimal> {
+    fn migration_cash_unit_multiplier(
+        &self,
+        activity: &Activity,
+        asset_multipliers: &mut HashMap<String, Option<Decimal>>,
+    ) -> Option<Decimal> {
         let requires_asset_multiplier = matches!(
             activity.effective_type(),
             ACTIVITY_TYPE_BUY
@@ -224,10 +228,29 @@ impl ActivityService {
             return Some(multiplier);
         }
         let asset_id = activity.asset_id.as_deref()?;
-        self.asset_service
+        if let Some(multiplier) = asset_multipliers.get(asset_id) {
+            return *multiplier;
+        }
+        let multiplier = self
+            .asset_service
             .get_asset_by_id(asset_id)
             .ok()
-            .map(|asset| asset.contract_multiplier())
+            .map(|asset| asset.contract_multiplier());
+        asset_multipliers.insert(asset_id.to_string(), multiplier);
+        multiplier
+    }
+
+    fn should_reconcile_migrated_broker_trade(activity: &Activity) -> bool {
+        !activity.is_user_modified
+            && matches!(
+                activity.effective_type(),
+                ACTIVITY_TYPE_BUY | ACTIVITY_TYPE_SELL
+            )
+            && activity
+                .source_system
+                .as_deref()
+                .is_some_and(|source| source.eq_ignore_ascii_case("SNAPTRADE"))
+            && activity.fx_rate.is_none_or(|rate| rate == Decimal::ONE)
     }
 
     fn import_cash_unit_multiplier(&self, activity: &ActivityImport) -> Decimal {
@@ -953,6 +976,128 @@ impl ActivityService {
         }
     }
 
+    fn cash_transfer_gross_from_final(activity: &Activity, amount: Decimal) -> Result<Decimal> {
+        let charges = activity.fee_amt() + activity.tax_amt();
+        let gross = match activity.effective_type() {
+            ACTIVITY_TYPE_TRANSFER_OUT => amount.abs() - charges,
+            ACTIVITY_TYPE_TRANSFER_IN => amount.abs() + charges,
+            _ => {
+                return Err(Self::invalid_activity_data(
+                    "Activity is not a cash transfer leg",
+                ));
+            }
+        };
+
+        (gross > Decimal::ZERO)
+            .then_some(gross)
+            .ok_or_else(|| Self::invalid_activity_data("Transfer total must exceed its charges"))
+    }
+
+    fn cash_transfer_final_from_gross(activity: &Activity, gross: Decimal) -> Result<Decimal> {
+        let charges = activity.fee_amt() + activity.tax_amt();
+        let amount = match activity.effective_type() {
+            ACTIVITY_TYPE_TRANSFER_OUT => gross + charges,
+            ACTIVITY_TYPE_TRANSFER_IN => gross - charges,
+            _ => {
+                return Err(Self::invalid_activity_data(
+                    "Activity is not a cash transfer leg",
+                ));
+            }
+        };
+
+        (amount > Decimal::ZERO)
+            .then_some(amount)
+            .ok_or_else(|| Self::invalid_activity_data("Transfer charges exceed its gross value"))
+    }
+
+    fn cash_transfer_gross_after_update(
+        existing: &Activity,
+        update: &ActivityUpdate,
+    ) -> Result<Decimal> {
+        let mut proposed = existing.clone();
+        proposed.amount = update.amount.unwrap_or(existing.amount);
+        proposed.fee = update.fee.unwrap_or(existing.fee);
+        proposed.tax = update.tax.unwrap_or(existing.tax);
+        let amount = proposed
+            .amount
+            .ok_or_else(|| Self::invalid_activity_data("Cash transfer amount is required"))?;
+        Self::cash_transfer_gross_from_final(&proposed, amount)
+    }
+
+    fn cash_transfer_fx_rate_after_update(
+        existing: &Activity,
+        update: &ActivityUpdate,
+    ) -> Option<Decimal> {
+        update.fx_rate.unwrap_or(existing.fx_rate)
+    }
+
+    fn cash_transfer_economics_changed(existing: &Activity, update: &ActivityUpdate) -> bool {
+        let changed = |patch: Option<Option<Decimal>>, current: Option<Decimal>| {
+            patch.is_some_and(|value| {
+                value.map(|amount| amount.abs()) != current.map(|amount| amount.abs())
+            })
+        };
+        changed(update.amount, existing.amount)
+            || changed(update.fee, existing.fee)
+            || changed(update.tax, existing.tax)
+            || update
+                .fx_rate
+                .is_some_and(|value| value != existing.fx_rate)
+            || !update.currency.eq_ignore_ascii_case(&existing.currency)
+    }
+
+    fn validate_explicit_cash_pair_updates(
+        pair: &TransferPair,
+        transfer_out_update: &ActivityUpdate,
+        transfer_in_update: &ActivityUpdate,
+    ) -> Result<()> {
+        if !Self::is_cash_transfer_pair(pair)
+            || (!Self::cash_transfer_economics_changed(&pair.transfer_out, transfer_out_update)
+                && !Self::cash_transfer_economics_changed(&pair.transfer_in, transfer_in_update))
+        {
+            return Ok(());
+        }
+
+        let out_gross =
+            Self::cash_transfer_gross_after_update(&pair.transfer_out, transfer_out_update)?;
+        let in_gross =
+            Self::cash_transfer_gross_after_update(&pair.transfer_in, transfer_in_update)?;
+        let expected_in_gross = if transfer_out_update
+            .currency
+            .eq_ignore_ascii_case(&transfer_in_update.currency)
+        {
+            out_gross
+        } else {
+            let in_rate =
+                Self::cash_transfer_fx_rate_after_update(&pair.transfer_in, transfer_in_update);
+            let out_rate =
+                Self::cash_transfer_fx_rate_after_update(&pair.transfer_out, transfer_out_update);
+            if in_rate.zip(out_rate).is_some_and(|(in_rate, out_rate)| {
+                (in_rate - out_rate).abs() > Self::transfer_match_tolerance()
+            }) {
+                return Err(Self::invalid_activity_data(
+                    "Transfer legs must use the same FX rate",
+                ));
+            }
+            let rate = in_rate
+                .or(out_rate)
+                .filter(|rate| rate.is_sign_positive() && !rate.is_zero())
+                .ok_or_else(|| {
+                    Self::invalid_activity_data(
+                        "Cross-currency transfer updates require a valid FX rate",
+                    )
+                })?;
+            out_gross * rate
+        };
+
+        if (expected_in_gross - in_gross).abs() > Self::transfer_match_tolerance() {
+            return Err(Self::invalid_activity_data(
+                "Transfer legs must use matching gross values and FX rate",
+            ));
+        }
+        Ok(())
+    }
+
     fn transfer_date_diff_days(left: &Activity, right: &Activity) -> i64 {
         (left.activity_date.date_naive() - right.activity_date.date_naive())
             .num_days()
@@ -1302,8 +1447,8 @@ impl ActivityService {
                 quantity: Some(None),
                 unit_price: Some(None),
                 currency: values.source_currency.clone(),
-                fee: Some(None),
-                tax: Some(None),
+                fee: None,
+                tax: None,
                 amount: Some(Some(values.source_amount)),
                 status: None,
                 notes: request.notes.clone(),
@@ -1321,8 +1466,8 @@ impl ActivityService {
                 quantity: Some(None),
                 unit_price: Some(None),
                 currency: values.destination_currency.clone(),
-                fee: Some(None),
-                tax: Some(None),
+                fee: None,
+                tax: None,
                 amount: Some(Some(values.destination_amount)),
                 status: None,
                 notes: request.notes.clone(),
@@ -1366,39 +1511,52 @@ impl ActivityService {
             metadata: None,
         };
 
-        let Some(Some(amount)) = update.amount else {
-            return Ok(Some(counterpart_update));
-        };
-
         if !Self::is_cash_transfer_pair(pair) {
             return Ok(Some(counterpart_update));
         }
 
-        if existing
-            .currency
-            .eq_ignore_ascii_case(&counterpart.currency)
+        if update.amount.is_none()
+            && update.fee.is_none()
+            && update.tax.is_none()
+            && update.fx_rate.is_none()
+            && update.currency.eq_ignore_ascii_case(&existing.currency)
         {
-            counterpart_update.amount = Some(Some(amount.abs()));
+            return Ok(Some(counterpart_update));
+        }
+        let gross = Self::cash_transfer_gross_after_update(existing, update)?;
+
+        if update.currency.eq_ignore_ascii_case(&counterpart.currency) {
+            let counterpart_amount = Self::cash_transfer_final_from_gross(counterpart, gross)?;
+            counterpart_update.amount = Some(Some(counterpart_amount));
             return Ok(Some(counterpart_update));
         }
 
-        let rate = pair
-            .transfer_in
-            .fx_rate
-            .or_else(|| update.fx_rate.flatten())
-            .filter(|rate| rate.is_sign_positive() && !rate.is_zero())
-            .ok_or_else(|| {
-                Self::invalid_activity_data(
-                    "Cross-currency transfer amount updates require a valid FX rate",
-                )
-            })?;
-
-        let counterpart_amount = if existing.id == pair.transfer_out.id {
-            amount.abs() * rate
+        let rate = if update.fx_rate.is_some() {
+            Self::cash_transfer_fx_rate_after_update(existing, update).or(counterpart.fx_rate)
         } else {
-            amount.abs() / rate
+            pair.transfer_in.fx_rate.or(pair.transfer_out.fx_rate)
+        }
+        .filter(|rate| rate.is_sign_positive() && !rate.is_zero())
+        .ok_or_else(|| {
+            Self::invalid_activity_data(
+                "Cross-currency transfer amount updates require a valid FX rate",
+            )
+        })?;
+
+        let counterpart_gross = if existing.id == pair.transfer_out.id {
+            gross * rate
+        } else {
+            gross / rate
         };
-        counterpart_update.amount = Some(Some(counterpart_amount));
+        counterpart_update.amount = Some(Some(Self::cash_transfer_final_from_gross(
+            counterpart,
+            counterpart_gross,
+        )?));
+        counterpart_update.fx_rate = if counterpart.effective_type() == ACTIVITY_TYPE_TRANSFER_IN {
+            Some(Some(rate))
+        } else {
+            Some(None)
+        };
 
         Ok(Some(counterpart_update))
     }
@@ -3948,6 +4106,7 @@ impl ActivityServiceTrait for ActivityService {
             })
             .collect();
         let mut claimed_recomputed_keys = HashSet::new();
+        let mut asset_multipliers = HashMap::new();
         let mut updates = Vec::new();
         let mut changed_activities = Vec::new();
 
@@ -3960,9 +4119,30 @@ impl ActivityServiceTrait for ActivityService {
 
             let migrated_amount = if let Some(amount) = activity.amount {
                 let magnitude = amount.abs();
-                (magnitude != amount).then_some(magnitude)
+                let reconciled = if Self::should_reconcile_migrated_broker_trade(&activity) {
+                    self.migration_cash_unit_multiplier(&activity, &mut asset_multipliers)
+                        .and_then(|unit_multiplier| {
+                            ActivityEconomicsResolver::reconcile_imported_trade_amount(
+                                ActivityCashInputs {
+                                    activity_type: activity.effective_type(),
+                                    is_security_transfer: false,
+                                    quantity: activity.quantity,
+                                    unit_price: activity.unit_price,
+                                    amount: Some(magnitude),
+                                    fee: activity.fee,
+                                    tax: activity.tax,
+                                    unit_multiplier,
+                                },
+                                currency_rounding_tolerance(&activity.currency),
+                            )
+                        })
+                        .unwrap_or(magnitude)
+                } else {
+                    magnitude
+                };
+                (reconciled != amount).then_some(reconciled)
             } else {
-                self.migration_cash_unit_multiplier(&activity)
+                self.migration_cash_unit_multiplier(&activity, &mut asset_multipliers)
                     .and_then(|multiplier| {
                         ActivityEconomicsResolver::resolve_cash(&activity, multiplier).amount
                     })
@@ -4407,7 +4587,7 @@ impl ActivityServiceTrait for ActivityService {
         &self,
         request: InternalTransferPairRequest,
     ) -> Result<InternalTransferPairResponse> {
-        let pair_values = self.validate_internal_pair_request(&request)?;
+        let mut pair_values = self.validate_internal_pair_request(&request)?;
 
         let is_update = request.transfer_out_id.is_some() || request.transfer_in_id.is_some();
         let mut old_account_ids: HashSet<String> = HashSet::new();
@@ -4435,6 +4615,19 @@ impl ActivityServiceTrait for ActivityService {
                 return Err(Self::invalid_activity_data(
                     "Pair save currently supports internal cash transfers only",
                 ));
+            }
+
+            if pair_values
+                .source_currency
+                .eq_ignore_ascii_case(&pair_values.destination_currency)
+            {
+                // Same-currency legs share a gross value, not necessarily a final total.
+                let gross = Self::cash_transfer_gross_from_final(
+                    &pair.transfer_out,
+                    pair_values.source_amount,
+                )?;
+                pair_values.destination_amount =
+                    Self::cash_transfer_final_from_gross(&pair.transfer_in, gross)?;
             }
 
             for activity in [&pair.transfer_out, &pair.transfer_in] {
@@ -4599,11 +4792,12 @@ impl ActivityServiceTrait for ActivityService {
         let mut old_activity_dates: Vec<DateTime<Utc>> = Vec::new();
         let mut old_activities: Vec<Activity> = Vec::new();
 
-        let explicit_update_ids: HashSet<String> = request
+        let explicit_updates_by_id: HashMap<String, ActivityUpdate> = request
             .updates
             .iter()
-            .map(|update| update.id.clone())
+            .map(|update| (update.id.clone(), update.clone()))
             .collect();
+        let explicit_update_ids: HashSet<String> = explicit_updates_by_id.keys().cloned().collect();
         let mut update_requests: Vec<ActivityUpdate> = Vec::new();
         for update_request in request.updates {
             match self.activity_repository.get_activity(&update_request.id) {
@@ -4617,7 +4811,24 @@ impl ActivityServiceTrait for ActivityService {
                             pair.transfer_in.id.clone()
                         };
 
-                        if !explicit_update_ids.contains(&counterpart_id) {
+                        if explicit_update_ids.contains(&counterpart_id) {
+                            if existing.id == pair.transfer_out.id {
+                                let counterpart_update = explicit_updates_by_id
+                                    .get(&counterpart_id)
+                                    .expect("explicit counterpart update should exist");
+                                if let Err(err) = Self::validate_explicit_cash_pair_updates(
+                                    &pair,
+                                    &update_request,
+                                    counterpart_update,
+                                ) {
+                                    errors.push(ActivityBulkMutationError {
+                                        id: Some(update_request.id.clone()),
+                                        action: "update".to_string(),
+                                        message: err.to_string(),
+                                    });
+                                }
+                            }
+                        } else {
                             match self.build_counterpart_update(&update_request, &existing, &pair) {
                                 Ok(Some(counterpart_update)) => {
                                     update_requests.push(counterpart_update);

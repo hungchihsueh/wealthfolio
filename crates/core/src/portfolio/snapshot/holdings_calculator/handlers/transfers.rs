@@ -116,6 +116,9 @@ impl HoldingsCalculator {
         } else {
             // Asset transfer
             let activity_date = self.activity_local_date(activity);
+            if !resolved.signed_cash_effect.is_zero() {
+                add_cash(state, activity_currency, resolved.signed_cash_effect);
+            }
 
             let position = self.get_or_create_position_mut_cached(
                 state,
@@ -421,6 +424,9 @@ impl HoldingsCalculator {
         } else {
             // Asset transfer
             let activity_date = self.activity_local_date(activity);
+            if !resolved.signed_cash_effect.is_zero() {
+                add_cash(state, &activity.currency, resolved.signed_cash_effect);
+            }
 
             if let Some(position) = state.positions.get_mut(asset_id) {
                 let position_currency = position.currency.clone();
