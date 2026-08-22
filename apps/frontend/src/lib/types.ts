@@ -236,7 +236,7 @@ export interface ActivityDetails {
   idempotencyKey?: string;
   importRunId?: string;
   isUserModified?: boolean;
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, unknown> | null;
   transferOutId?: string;
   transferInId?: string;
   counterpartActivityId?: string;

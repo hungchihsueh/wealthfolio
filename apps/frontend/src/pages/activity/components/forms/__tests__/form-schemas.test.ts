@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { buyFormSchema } from "../buy-form";
-import { sellFormSchema } from "../sell-form";
+import { buyFormSchema, type BuyFormValues } from "../buy-form";
+import { sellFormSchema, type SellFormValues } from "../sell-form";
 import { depositFormSchema } from "../deposit-form";
 import { withdrawalFormSchema } from "../withdrawal-form";
 import { dividendFormSchema, type DividendFormValues } from "../dividend-form";
@@ -12,6 +12,7 @@ import { taxFormSchema } from "../tax-form";
 import { newActivitySchema } from "../schemas";
 import { ACTIVITY_FORM_CONFIG } from "../../../config/activity-form-config";
 import { ACTIVITY_SUBTYPES, ActivityType } from "@/lib/constants";
+import type { ActivityDetails } from "@/lib/types";
 
 describe("Form Schemas Validation", () => {
   describe("buyFormSchema", () => {
@@ -1242,6 +1243,42 @@ describe("Form Schemas Validation", () => {
         unitPrice: 6,
         tax: 1.8,
       });
+    });
+  });
+
+  describe("trade edit defaults", () => {
+    const activityWithNullMetadata = {
+      accountId: "acc-123",
+      assetId: "asset-aapl",
+      assetSymbol: "AAPL",
+      date: new Date("2026-08-22T12:00:00.000Z"),
+      quantity: "1",
+      unitPrice: "10",
+      amount: "12",
+      fee: "1",
+      tax: "1",
+      currency: "USD",
+      metadata: null,
+    } satisfies Partial<ActivityDetails>;
+
+    it("normalizes null activity metadata before validating BUY edits", () => {
+      const defaults = ACTIVITY_FORM_CONFIG.BUY.getDefaults(
+        { ...activityWithNullMetadata, activityType: ActivityType.BUY },
+        [],
+      ) as Partial<BuyFormValues>;
+
+      expect(defaults.activityMetadata).toBeUndefined();
+      expect(buyFormSchema.safeParse(defaults).success).toBe(true);
+    });
+
+    it("normalizes null activity metadata before validating SELL edits", () => {
+      const defaults = ACTIVITY_FORM_CONFIG.SELL.getDefaults(
+        { ...activityWithNullMetadata, activityType: ActivityType.SELL, amount: "8" },
+        [],
+      ) as Partial<SellFormValues>;
+
+      expect(defaults.activityMetadata).toBeUndefined();
+      expect(sellFormSchema.safeParse(defaults).success).toBe(true);
     });
   });
 

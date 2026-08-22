@@ -526,6 +526,26 @@ describe("activity-utils", () => {
       expect(JSON.parse(result.updates[0].metadata ?? "missing")).toEqual({});
     });
 
+    it("should preserve absent metadata when editing a persisted row", () => {
+      const transaction = createMockTransaction({
+        id: "existing-without-metadata",
+        isNew: false,
+        metadata: null,
+      });
+
+      const result = buildSavePayload(
+        [transaction],
+        new Set([transaction.id]),
+        new Set(),
+        mockResolveTransactionCurrency,
+        dirtyCurrencyLookup,
+        assetCurrencyLookup,
+        "USD",
+      );
+
+      expect(result.updates[0].metadata).toBeUndefined();
+    });
+
     it.each([true, false])(
       "should preserve only an explicit %s credit boundary for a new duplicate",
       (isExternal) => {
