@@ -11,8 +11,8 @@ use wealthfolio_connect::{
     BrokerSyncService, CoreImportRunRepositoryAdapter, ImportRunRepositoryTrait,
 };
 use wealthfolio_core::{
-    accounts::{AccountService, AccountServiceTrait},
-    activities::{ActivityService, ActivityServiceTrait},
+    accounts::AccountService,
+    activities::{run_activity_cash_amount_v4, ActivityService},
     addons::AddonService,
     assets::{AlternativeAssetService, AssetClassificationService, AssetService},
     events::DomainEvent,
@@ -27,8 +27,8 @@ use wealthfolio_core::{
         income::IncomeService,
         net_worth::NetWorthService,
         performance::PerformanceService,
-        snapshot::{SnapshotRecalcMode, SnapshotService, SnapshotServiceTrait},
-        valuation::{ValuationRecalcMode, ValuationService, ValuationServiceTrait},
+        snapshot::SnapshotService,
+        valuation::ValuationService,
     },
     portfolios::PortfolioService,
     quotes::{QuoteService, QuoteServiceTrait},
@@ -426,68 +426,14 @@ pub async fn initialize_context(
         .with_lot_repository(lots_repository.clone()),
     );
 
-    const ACTIVITY_CASH_AMOUNT_MIGRATION_KEY: &str = "migration.activity_cash_amount.v4";
-    if settings_service
-        .get_setting_value(ACTIVITY_CASH_AMOUNT_MIGRATION_KEY)?
-        .as_deref()
-        != Some("complete")
-    {
-        // Persist the pending state before changing rows. A crash or rebuild
-        // failure therefore retries the complete migration/rebuild sequence.
-        settings_service
-            .set_setting_value(ACTIVITY_CASH_AMOUNT_MIGRATION_KEY, "rebuild_pending")
-            .await?;
-        let migrated = activity_service.migrate_activity_cash_amounts().await?;
-        // Closed accounts remain in portfolio history until archived, so their
-        // derived snapshots must be rebuilt before this migration is complete.
-        let account_ids: Vec<String> = account_service
-            .get_non_archived_accounts()?
-            .into_iter()
-            .map(|account| account.id)
-            .collect();
-        let rebuild_complete = if account_ids.is_empty() {
-            true
-        } else {
-            match snapshot_service
-                .recalculate_holdings_snapshots(Some(&account_ids), SnapshotRecalcMode::Full)
-                .await
-            {
-                Ok(_) => match valuation_service
-                    .calculate_valuation_histories(&account_ids, ValuationRecalcMode::Full)
-                    .await
-                {
-                    Ok(outcome) if outcome.failures.is_empty() => true,
-                    Ok(outcome) => {
-                        warn!(
-                            "Cash amount migration valuation rebuild failed for {} account(s); it will retry next startup",
-                            outcome.failures.len()
-                        );
-                        false
-                    }
-                    Err(err) => {
-                        warn!(
-                            "Cash amount migration valuation rebuild failed: {}; it will retry next startup",
-                            err
-                        );
-                        false
-                    }
-                },
-                Err(err) => {
-                    warn!(
-                        "Cash amount migration holdings rebuild failed: {}; it will retry next startup",
-                        err
-                    );
-                    false
-                }
-            }
-        };
-        if rebuild_complete {
-            settings_service
-                .set_setting_value(ACTIVITY_CASH_AMOUNT_MIGRATION_KEY, "complete")
-                .await?;
-        }
-        log::info!("Canonicalized cash amounts for {} activities", migrated);
-    }
+    run_activity_cash_amount_v4(
+        settings_service.as_ref(),
+        activity_service.as_ref(),
+        account_service.as_ref(),
+        snapshot_service.as_ref(),
+        valuation_service.as_ref(),
+    )
+    .await;
 
     let performance_service = Arc::new(
         PerformanceService::new_with_timezone(
