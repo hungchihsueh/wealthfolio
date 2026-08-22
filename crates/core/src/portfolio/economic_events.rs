@@ -184,11 +184,20 @@ impl ActivityEconomicsResolver {
     }
 
     pub fn resolve_cash_inputs(inputs: ActivityCashInputs<'_>) -> ResolvedActivityCash {
-        if inputs.activity_type == ACTIVITY_TYPE_SPLIT || inputs.is_security_transfer {
+        if inputs.activity_type == ACTIVITY_TYPE_SPLIT {
             return ResolvedActivityCash::default();
         }
 
         let fee = inputs.fee.unwrap_or(Decimal::ZERO).abs();
+        if inputs.is_security_transfer {
+            // Security principal is non-cash, but embedded fees remain cash outflows
+            // for compatibility with existing activity rows and rebuilt snapshots.
+            return ResolvedActivityCash {
+                signed_cash_effect: -fee,
+                ..ResolvedActivityCash::default()
+            };
+        }
+
         let tax = inputs.tax.unwrap_or(Decimal::ZERO).abs();
         let charges = fee + tax;
         let expected_amount = Self::derived_cash_amount(inputs, fee, tax);
@@ -235,6 +244,49 @@ impl ActivityEconomicsResolver {
             signed_cash_effect,
             gross_amount,
             amount_was_derived,
+        }
+    }
+
+    /// Converts a provider trade amount from gross to final cash only when the
+    /// supplied value unambiguously matches gross and does not match final cash.
+    pub fn reconcile_imported_trade_amount(
+        inputs: ActivityCashInputs<'_>,
+        tolerance: Decimal,
+    ) -> Option<Decimal> {
+        let supplied = inputs.amount.map(|amount| amount.abs())?;
+        if inputs.is_security_transfer
+            || !matches!(inputs.activity_type, ACTIVITY_TYPE_BUY | ACTIVITY_TYPE_SELL)
+        {
+            return Some(supplied);
+        }
+
+        let charges =
+            inputs.fee.unwrap_or(Decimal::ZERO).abs() + inputs.tax.unwrap_or(Decimal::ZERO).abs();
+        let gross = match (inputs.quantity, inputs.unit_price) {
+            (Some(quantity), Some(unit_price)) => {
+                quantity.abs()
+                    * unit_price.abs()
+                    * Self::valid_unit_multiplier(inputs.unit_multiplier)
+            }
+            _ => return Some(supplied),
+        };
+        let expected_final = match inputs.activity_type {
+            ACTIVITY_TYPE_BUY => gross + charges,
+            ACTIVITY_TYPE_SELL if gross > charges => gross - charges,
+            _ => return Some(supplied),
+        };
+
+        let tolerance = tolerance.abs();
+        let matches_gross = (supplied - gross).abs() <= tolerance;
+        let matches_final = (supplied - expected_final).abs() <= tolerance;
+        if matches_gross && !matches_final {
+            match inputs.activity_type {
+                ACTIVITY_TYPE_BUY => Some(supplied + charges),
+                ACTIVITY_TYPE_SELL if supplied > charges => Some(supplied - charges),
+                _ => Some(supplied),
+            }
+        } else {
+            Some(supplied)
         }
     }
 
@@ -637,6 +689,46 @@ mod cash_tests {
     }
 
     #[test]
+    fn imported_trade_reconciliation_changes_only_unambiguous_gross_amounts() {
+        let mut gross_buy = inputs(ACTIVITY_TYPE_BUY);
+        gross_buy.amount = Some(dec!(20));
+        assert_eq!(
+            ActivityEconomicsResolver::reconcile_imported_trade_amount(gross_buy, dec!(0.01)),
+            Some(dec!(23))
+        );
+
+        let mut final_sell = inputs(ACTIVITY_TYPE_SELL);
+        final_sell.amount = Some(dec!(17.004));
+        assert_eq!(
+            ActivityEconomicsResolver::reconcile_imported_trade_amount(final_sell, dec!(0.01)),
+            Some(dec!(17.004))
+        );
+
+        let mut sub_tolerance_fee = inputs(ACTIVITY_TYPE_BUY);
+        sub_tolerance_fee.amount = Some(dec!(20));
+        sub_tolerance_fee.fee = Some(dec!(0.005));
+        sub_tolerance_fee.tax = None;
+        assert_eq!(
+            ActivityEconomicsResolver::reconcile_imported_trade_amount(
+                sub_tolerance_fee,
+                dec!(0.01)
+            ),
+            Some(dec!(20))
+        );
+
+        let mut adjusted_drip = inputs(ACTIVITY_TYPE_BUY);
+        adjusted_drip.quantity = Some(dec!(0.001));
+        adjusted_drip.unit_price = Some(dec!(589.8108));
+        adjusted_drip.amount = Some(dec!(0.30));
+        adjusted_drip.fee = None;
+        adjusted_drip.tax = None;
+        assert_eq!(
+            ActivityEconomicsResolver::reconcile_imported_trade_amount(adjusted_drip, dec!(0.01)),
+            Some(dec!(0.30))
+        );
+    }
+
+    #[test]
     fn missing_trade_amount_is_derived_with_multiplier_and_charges() {
         let mut buy = inputs(ACTIVITY_TYPE_BUY);
         buy.unit_multiplier = dec!(100);
@@ -674,6 +766,33 @@ mod cash_tests {
     }
 
     #[test]
+    fn final_amount_and_gross_contract_matrix() {
+        let cases = [
+            (ACTIVITY_TYPE_BUY, dec!(23), dec!(-23), dec!(20)),
+            (ACTIVITY_TYPE_SELL, dec!(17), dec!(17), dec!(20)),
+            (ACTIVITY_TYPE_DEPOSIT, dec!(17), dec!(17), dec!(20)),
+            (ACTIVITY_TYPE_DIVIDEND, dec!(17), dec!(17), dec!(20)),
+            (ACTIVITY_TYPE_INTEREST, dec!(17), dec!(17), dec!(20)),
+            (ACTIVITY_TYPE_CREDIT, dec!(17), dec!(17), dec!(20)),
+            (ACTIVITY_TYPE_TRANSFER_IN, dec!(17), dec!(17), dec!(20)),
+            (ACTIVITY_TYPE_WITHDRAWAL, dec!(23), dec!(-23), dec!(20)),
+            (ACTIVITY_TYPE_TRANSFER_OUT, dec!(23), dec!(-23), dec!(20)),
+            (ACTIVITY_TYPE_FEE, dec!(3), dec!(-3), dec!(3)),
+            (ACTIVITY_TYPE_TAX, dec!(3), dec!(-3), dec!(3)),
+        ];
+
+        for (activity_type, final_amount, signed_cash, gross_amount) in cases {
+            let mut case = inputs(activity_type);
+            case.amount = Some(final_amount);
+            let resolved = ActivityEconomicsResolver::resolve_cash_inputs(case);
+
+            assert_eq!(resolved.amount, Some(final_amount), "{activity_type}");
+            assert_eq!(resolved.signed_cash_effect, signed_cash, "{activity_type}");
+            assert_eq!(resolved.gross_amount, Some(gross_amount), "{activity_type}");
+        }
+    }
+
+    #[test]
     fn standalone_charges_and_security_transfers_follow_cash_contract() {
         let mut fee = inputs(ACTIVITY_TYPE_FEE);
         fee.amount = None;
@@ -700,10 +819,10 @@ mod cash_tests {
         let mut transfer = inputs(ACTIVITY_TYPE_TRANSFER_IN);
         transfer.amount = Some(dec!(25));
         transfer.is_security_transfer = true;
-        assert_eq!(
-            ActivityEconomicsResolver::resolve_cash_inputs(transfer),
-            ResolvedActivityCash::default()
-        );
+        let transfer = ActivityEconomicsResolver::resolve_cash_inputs(transfer);
+        assert_eq!(transfer.amount, None);
+        assert_eq!(transfer.gross_amount, None);
+        assert_eq!(transfer.signed_cash_effect, dec!(-1));
     }
 
     #[test]

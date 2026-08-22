@@ -14,7 +14,10 @@ use rust_decimal::Decimal;
 use super::models::AccountUniversalActivity;
 use wealthfolio_core::activities::{self, AssetResolutionInput, NewActivity};
 use wealthfolio_core::assets::{parse_crypto_pair_symbol, parse_symbol_with_known_exchange};
-use wealthfolio_core::fx::currency::{get_normalization_rule, normalize_amount, resolve_currency};
+use wealthfolio_core::fx::currency::{
+    currency_rounding_tolerance, get_normalization_rule, normalize_amount, resolve_currency,
+};
+use wealthfolio_core::portfolio::economic_events::{ActivityCashInputs, ActivityEconomicsResolver};
 
 /// Minimum confidence score to consider a mapping reliable
 const CONFIDENCE_THRESHOLD: f64 = 0.7;
@@ -595,6 +598,33 @@ pub fn map_broker_activity(
             (unit_price, quantity, fee, amount, currency_code)
         };
 
+    // Providers use both gross and fee-inclusive trade amounts. Convert only
+    // when the supplied value uniquely matches gross; otherwise preserve it.
+    let unit_multiplier = if is_option_activity {
+        Decimal::from(100)
+    } else if is_bond {
+        Decimal::new(1, 2)
+    } else {
+        Decimal::ONE
+    };
+    let amount = if fx_rate.is_none_or(|rate| rate == Decimal::ONE) {
+        ActivityEconomicsResolver::reconcile_imported_trade_amount(
+            ActivityCashInputs {
+                activity_type: &activity_type,
+                is_security_transfer: false,
+                quantity,
+                unit_price,
+                amount,
+                fee,
+                tax: None,
+                unit_multiplier,
+            },
+            currency_rounding_tolerance(&currency_code),
+        )
+    } else {
+        amount
+    };
+
     // Determine status
     let status = if needs_review_flag {
         wealthfolio_core::activities::ActivityStatus::Draft
@@ -770,31 +800,31 @@ mod tests {
     }
 
     #[test]
-    fn test_map_broker_activity_trade_amount_policy_preserves_supplied_amount() {
+    fn test_map_broker_activity_converts_unambiguous_gross_buy_amount() {
         let activity = AccountUniversalActivity {
-            id: Some("act-equity-buy".to_string()),
+            id: Some("act-crypto-buy".to_string()),
             activity_type: Some("BUY".to_string()),
-            symbol: Some(broker_symbol("AMD", "cs")),
-            units: Some(10.0),
-            price: Some(99.76),
-            amount: Some(-9976.0),
-            fee: Some(4.9),
+            symbol: Some(broker_symbol("XXBT", "crypto")),
+            units: Some(0.00505319),
+            price: Some(97967.8183),
+            amount: Some(495.05),
+            fee: Some(4.95),
             ..Default::default()
         };
 
         let mapped = map_test_activity(&activity);
 
-        assert_eq!(mapped.amount.unwrap().round_dp(4), decimal("9976.0000"));
-        assert_eq!(mapped.fee.unwrap().round_dp(4), decimal("4.9000"));
+        assert_eq!(mapped.amount.unwrap().round_dp(4), decimal("500.0000"));
+        assert_eq!(mapped.fee.unwrap().round_dp(4), decimal("4.9500"));
         assert_eq!(mapped.tax, None);
 
         let metadata: serde_json::Value =
             serde_json::from_str(mapped.metadata.as_deref().unwrap()).unwrap();
-        assert_eq!(metadata["source_amount"], -9976.0);
+        assert_eq!(metadata["source_amount"], 495.05);
     }
 
     #[test]
-    fn test_map_broker_activity_trade_amount_policy_preserves_bond_amount() {
+    fn test_map_broker_activity_converts_bond_gross_using_quote_multiplier() {
         let activity = AccountUniversalActivity {
             id: Some("act-bond-buy".to_string()),
             activity_type: Some("BUY".to_string()),
@@ -802,12 +832,13 @@ mod tests {
             units: Some(1000.0),
             price: Some(99.0),
             amount: Some(990.0),
+            fee: Some(5.0),
             ..Default::default()
         };
 
         let mapped = map_test_activity(&activity);
 
-        assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("990.00"));
+        assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("995.00"));
         let asset = mapped.asset.expect("bond activity should produce an asset");
         assert_eq!(asset.kind.as_deref(), Some("BOND"));
         assert_eq!(asset.instrument_type.as_deref(), Some("BOND"));
@@ -824,13 +855,91 @@ mod tests {
             }),
             units: Some(2.0),
             price: Some(3.0),
-            amount: Some(600.0),
+            amount: Some(605.0),
+            fee: Some(5.0),
             ..Default::default()
         };
 
         let mapped = map_test_activity(&activity);
 
-        assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("600.00"));
+        assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("605.00"));
+    }
+
+    #[test]
+    fn test_map_broker_activity_preserves_final_sell_with_broker_rounding() {
+        let activity = AccountUniversalActivity {
+            id: Some("act-equity-sell-final".to_string()),
+            activity_type: Some("SELL".to_string()),
+            symbol: Some(broker_symbol("NOW", "cs")),
+            units: Some(-61.0),
+            price: Some(86.9594),
+            amount: Some(5304.41),
+            fee: Some(-0.11),
+            ..Default::default()
+        };
+
+        let mapped = map_test_activity(&activity);
+
+        assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("5304.41"));
+        assert_eq!(mapped.fee.unwrap().round_dp(2), decimal("0.11"));
+    }
+
+    #[test]
+    fn test_map_broker_activity_converts_unambiguous_gross_sell_amount() {
+        let activity = AccountUniversalActivity {
+            id: Some("act-equity-sell-gross".to_string()),
+            activity_type: Some("SELL".to_string()),
+            symbol: Some(broker_symbol("AMD", "cs")),
+            units: Some(10.0),
+            price: Some(100.0),
+            amount: Some(1000.0),
+            fee: Some(5.0),
+            ..Default::default()
+        };
+
+        let mapped = map_test_activity(&activity);
+
+        assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("995.00"));
+    }
+
+    #[test]
+    fn test_map_broker_activity_preserves_adjusted_zero_fee_trade_and_non_one_fx() {
+        let adjusted_drip = AccountUniversalActivity {
+            id: Some("act-adjusted-drip".to_string()),
+            activity_type: Some("BUY".to_string()),
+            symbol: Some(broker_symbol("AAPL", "cs")),
+            units: Some(0.001),
+            price: Some(589.8108),
+            amount: Some(-0.30),
+            fee: Some(0.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            map_test_activity(&adjusted_drip)
+                .amount
+                .unwrap()
+                .round_dp(2),
+            decimal("0.30")
+        );
+
+        let gross_with_fx = AccountUniversalActivity {
+            id: Some("act-gross-with-fx".to_string()),
+            activity_type: Some("BUY".to_string()),
+            symbol: Some(broker_symbol("AMD", "cs")),
+            units: Some(10.0),
+            price: Some(100.0),
+            amount: Some(1000.0),
+            fee: Some(5.0),
+            fx_rate: Some(1.25),
+            ..Default::default()
+        };
+        assert_eq!(
+            map_test_activity(&gross_with_fx)
+                .amount
+                .unwrap()
+                .round_dp(2),
+            decimal("1000.00")
+        );
     }
 
     #[test]

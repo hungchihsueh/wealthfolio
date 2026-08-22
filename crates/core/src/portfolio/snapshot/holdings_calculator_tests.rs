@@ -2502,7 +2502,10 @@ mod tests {
         assert_eq!(position.average_cost, dec!(100.25));
         assert_eq!(position.total_cost_basis, dec!(1002.50));
         assert_eq!(position.lots[0].acquisition_price, dec!(99.76));
-        assert!(!next_state.cash_balances.contains_key(account_currency));
+        assert_eq!(
+            next_state.cash_balances.get(account_currency),
+            Some(&dec!(-4.90))
+        );
         assert_eq!(next_state.net_contribution, dec!(1002.50));
     }
 
@@ -2539,7 +2542,10 @@ mod tests {
         assert_eq!(position.average_cost, dec!(998.09));
         assert_eq!(position.total_cost_basis, dec!(9980.90));
         assert_eq!(position.lots[0].acquisition_price, dec!(997.60));
-        assert!(!next_state.cash_balances.contains_key(account_currency));
+        assert_eq!(
+            next_state.cash_balances.get(account_currency),
+            Some(&dec!(-4.90))
+        );
         assert_eq!(next_state.net_contribution, dec!(9980.90));
     }
 
@@ -2788,14 +2794,17 @@ mod tests {
         assert_eq!(position_tsla.total_cost_basis, dec!(2005)); // (10 * 200) + 5 USD
         assert_eq!(position_tsla.currency, asset_currency); // USD
 
-        // A security transfer is non-cash; charges must be separate activities.
-        assert!(!state_after_add.cash_balances.contains_key(asset_currency));
+        // The security principal is non-cash; its embedded fee remains a cash outflow.
+        assert_eq!(
+            state_after_add.cash_balances.get(asset_currency),
+            Some(&dec!(-5))
+        );
         assert_eq!(
             state_after_add.cash_balances.get(account_currency),
             Some(&dec!(1000)) // Unchanged 1000 CAD
         );
         // Verify cash_total_account_currency
-        assert_eq!(state_after_add.cash_total_account_currency, dec!(1000));
+        assert_eq!(state_after_add.cash_total_account_currency, dec!(993.5));
 
         // Check net contribution after External TransferIn (in CAD)
         // Cost basis added was 10 shares * 200 USD/share + 5 USD fee = 2005 USD.
@@ -2844,15 +2853,16 @@ mod tests {
         assert_eq!(position_tsla_after_remove.average_cost, dec!(200.5)); // Average cost remains
         assert_eq!(position_tsla_after_remove.total_cost_basis, dec!(1203)); // 6 * 200.5 USD
 
-        assert!(!state_after_remove
-            .cash_balances
-            .contains_key(asset_currency));
+        assert_eq!(
+            state_after_remove.cash_balances.get(asset_currency),
+            Some(&dec!(-7))
+        );
         assert_eq!(
             state_after_remove.cash_balances.get(account_currency),
             Some(&dec!(1000)) // Unchanged 1000 CAD
         );
         // Verify cash_total_account_currency
-        assert_eq!(state_after_remove.cash_total_account_currency, dec!(1000));
+        assert_eq!(state_after_remove.cash_total_account_currency, dec!(990.9));
 
         // Check net contribution after External TransferOut (in CAD)
         // Cost basis removed was 4 shares * 200.5 USD/share (FIFO cost) = 802 USD.
@@ -2938,10 +2948,11 @@ mod tests {
         assert_eq!(position_testusd.average_cost, dec!(120.2)); // (120 * 50 + 10) / 50 USD
         assert_eq!(position_testusd.total_cost_basis, dec!(6010)); // (50 * 120) + 10 USD
 
-        // Security transfers are non-cash.
-        assert!(!state_after_asset_tx_in
-            .cash_balances
-            .contains_key(asset_currency));
+        // The security principal is non-cash; its embedded fee remains a cash outflow.
+        assert_eq!(
+            state_after_asset_tx_in.cash_balances.get(asset_currency),
+            Some(&dec!(-10))
+        );
         assert_eq!(
             state_after_asset_tx_in.cash_balances.get(account_currency),
             Some(&dec!(5000)) // Unchanged 5000 CAD
@@ -2949,7 +2960,7 @@ mod tests {
         // Verify cash_total_account_currency
         assert_eq!(
             state_after_asset_tx_in.cash_total_account_currency,
-            dec!(5000)
+            dec!(4987)
         );
 
         // Net Contribution (CAD) - Transfers affect account-level net_contribution
@@ -2996,9 +3007,10 @@ mod tests {
         assert_eq!(position_testusd_after_out.average_cost, dec!(120.2)); // Remains same
         assert_eq!(position_testusd_after_out.total_cost_basis, dec!(3606)); // 30 * 120.2 USD
 
-        assert!(!state_after_asset_tx_out
-            .cash_balances
-            .contains_key(asset_currency));
+        assert_eq!(
+            state_after_asset_tx_out.cash_balances.get(asset_currency),
+            Some(&dec!(-15))
+        );
         assert_eq!(
             state_after_asset_tx_out.cash_balances.get(account_currency),
             Some(&dec!(5000)) // Unchanged 5000 CAD
@@ -3006,7 +3018,7 @@ mod tests {
         // Verify cash_total_account_currency
         assert_eq!(
             state_after_asset_tx_out.cash_total_account_currency,
-            dec!(5000)
+            dec!(4980.5)
         );
 
         // Net Contribution (CAD) - Transfers affect account-level net_contribution
@@ -3052,15 +3064,15 @@ mod tests {
         let state_after_cash_tx_in = result_cash_tx_in.unwrap().snapshot;
 
         // Cash checks (booked in ACTIVITY currency - USD, per design spec)
-        // Security transfers did not move cash. The cash transfer's stored amount
-        // is the final credit, so the USD balance becomes 992.
+        // Security-transfer fees left a -15 USD balance. The cash transfer's stored
+        // amount is the final credit, so the USD balance becomes 977.
         // CAD balance unchanged: 5000 CAD
-        let expected_usd_after_cash_tx_in = transfer_in_cash_activity.amt();
+        let expected_usd_after_cash_tx_in = dec!(-15) + transfer_in_cash_activity.amt();
         assert_eq!(
             state_after_cash_tx_in
                 .cash_balances
                 .get(cash_transfer_currency),
-            Some(&expected_usd_after_cash_tx_in) // 992 USD
+            Some(&expected_usd_after_cash_tx_in) // 977 USD
         );
         assert_eq!(
             state_after_cash_tx_in.cash_balances.get(account_currency),
@@ -4709,16 +4721,18 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // Security transfers are non-cash; fees require separate charge activities.
-        assert!(!next_state.cash_balances.contains_key(activity_currency));
+        // Security transfers move no principal cash, but their embedded fee remains a cash outflow.
+        assert_eq!(
+            next_state.cash_balances.get(activity_currency),
+            Some(&dec!(-10))
+        );
         assert_eq!(
             next_state.cash_balances.get(account_currency),
             Some(&dec!(1000))
         );
 
-        // cash_total_account_currency uses FxService rate for cash conversion
-        // 1000 CAD + (-10 USD * 1.30) = 1000 - 13 = 987 CAD
-        assert_eq!(next_state.cash_total_account_currency, dec!(1000));
+        // cash_total_account_currency uses FxService rate for fee cash conversion.
+        assert_eq!(next_state.cash_total_account_currency, dec!(987));
 
         // Net contribution reflects transfer cost basis in account currency (fx_rate provided)
         let expected_net_contribution = dec!(1510) * activity_fx_rate;
@@ -7654,9 +7668,9 @@ mod tests {
             .calculate_next_holdings(&prev, &[transfer_out], transfer_date)
             .unwrap();
 
-        // No position or cash movement is created for a non-cash transfer.
+        // No position is created, but the embedded fee remains a cash outflow.
         assert!(!result.snapshot.positions.contains_key("AAPL"));
-        assert!(!result.snapshot.cash_balances.contains_key("USD"));
+        assert_eq!(result.snapshot.cash_balances.get("USD"), Some(&dec!(-2)));
     }
 
     #[test]

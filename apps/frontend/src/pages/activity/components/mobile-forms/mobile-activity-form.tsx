@@ -38,7 +38,10 @@ import { useActivityMutations } from "../../hooks/use-activity-mutations";
 import { showValidationToast, type AccountSelectOption } from "../forms/fields";
 import { newActivitySchema, type NewActivityFormValues } from "../forms/schemas";
 import { MobileActivitySteps } from "./mobile-activity-steps";
-import { getMobileActivityAssetId } from "./mobile-activity-utils";
+import {
+  allocateInternalSecurityTransferFee,
+  getMobileActivityAssetId,
+} from "./mobile-activity-utils";
 
 interface MobileActivityFormProps {
   accounts: AccountSelectOption[];
@@ -692,6 +695,10 @@ export function MobileActivityForm({
                 providerSymbol: (assetMetadata as { providerSymbol?: string })?.providerSymbol,
               })
             : undefined;
+        const { transferOutFee, transferInFee } = allocateInternalSecurityTransferFee(
+          submitData.fee as number | null | undefined,
+          id ? activity?.activityType : undefined,
+        );
 
         if (id) {
           const transferOutId =
@@ -716,6 +723,7 @@ export function MobileActivityForm({
             activityType: ActivityType.TRANSFER_OUT,
             currency: fromAccount?.currency,
             asset: assetInput,
+            fee: transferOutFee,
           } as ActivityUpdate;
 
           const transferInActivity: ActivityUpdate = {
@@ -726,6 +734,7 @@ export function MobileActivityForm({
             currency: toAccount?.currency,
             asset: assetInput,
             fxRate: fxRate as ActivityUpdate["fxRate"],
+            fee: transferInFee,
           } as ActivityUpdate;
 
           await saveActivitiesMutation.mutateAsync({
@@ -746,6 +755,7 @@ export function MobileActivityForm({
           currency: fromAccount?.currency,
           sourceGroupId,
           asset: assetInput,
+          fee: transferOutFee,
         } as ActivityCreate;
 
         const transferInActivity: ActivityCreate = {
@@ -756,6 +766,7 @@ export function MobileActivityForm({
           sourceGroupId,
           asset: assetInput,
           fxRate: fxRate as ActivityCreate["fxRate"],
+          fee: transferInFee,
         } as ActivityCreate;
 
         await saveActivitiesMutation.mutateAsync({

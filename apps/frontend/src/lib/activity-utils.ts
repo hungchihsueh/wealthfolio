@@ -431,14 +431,15 @@ export interface ResolvedActivityCash {
 /** Mirrors the Rust ActivityEconomicsResolver for display and cash-audit paths. */
 export const resolveActivityCash = (activity: ActivityDetails): ResolvedActivityCash => {
   const { activityType, assetSymbol, assetId } = activity;
-  if (
-    activityType === ActivityType.SPLIT ||
-    isSecuritiesTransfer(activityType, assetSymbol, assetId)
-  ) {
+  if (activityType === ActivityType.SPLIT) {
     return { amount: null, expectedAmount: null, grossAmount: null, signedCashEffect: 0 };
   }
 
   const fee = Math.abs(getFee(activity));
+  if (isSecuritiesTransfer(activityType, assetSymbol, assetId)) {
+    return { amount: null, expectedAmount: null, grossAmount: null, signedCashEffect: -fee };
+  }
+
   const tax = Math.abs(getTax(activity));
   const charges = fee + tax;
   const quantity = Math.abs(getQuantity(activity));
@@ -586,14 +587,8 @@ export const calculateActivityValue = (activity: ActivityDetails): number => {
 };
 
 export const calculateActivityCashImpact = (activity: ActivityDetails): number => {
-  const { activityType, assetSymbol, assetId, subtype } = activity;
+  const { activityType, subtype } = activity;
   if (isAssetBackedIncomeSubtype(activityType, subtype)) return 0;
-  if (
-    (activityType === ActivityType.TRANSFER_IN || activityType === ActivityType.TRANSFER_OUT) &&
-    !isCashTransfer(activityType, assetSymbol, assetId)
-  ) {
-    return 0;
-  }
   return resolveActivityCash(activity).signedCashEffect;
 };
 

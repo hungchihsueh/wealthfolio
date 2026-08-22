@@ -426,7 +426,7 @@ pub async fn initialize_context(
         .with_lot_repository(lots_repository.clone()),
     );
 
-    const ACTIVITY_CASH_AMOUNT_MIGRATION_KEY: &str = "migration.activity_cash_amount.v3";
+    const ACTIVITY_CASH_AMOUNT_MIGRATION_KEY: &str = "migration.activity_cash_amount.v4";
     if settings_service
         .get_setting_value(ACTIVITY_CASH_AMOUNT_MIGRATION_KEY)?
         .as_deref()

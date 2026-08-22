@@ -649,7 +649,7 @@ describe("Activity Utilities", () => {
       ).toBe(100);
     });
 
-    it("does not treat securities transfers or asset-backed income as cash impact", () => {
+    it("treats only embedded fees on securities transfers as cash impact", () => {
       expect(
         calculateActivityCashImpact(
           createActivity({
@@ -659,11 +659,28 @@ describe("Activity Utilities", () => {
             quantity: "10",
             unitPrice: "100",
             amount: "0",
-            fee: "0",
+            fee: "5",
           }),
         ),
-      ).toBe(0);
+      ).toBe(-5);
 
+      expect(
+        calculateActivityCashImpact(
+          createActivity({
+            activityType: ActivityType.TRANSFER_OUT,
+            assetSymbol: "AAPL",
+            assetId: "AAPL",
+            quantity: "10",
+            unitPrice: "100",
+            amount: "1000",
+            fee: "3",
+            tax: "7",
+          }),
+        ),
+      ).toBe(-3);
+    });
+
+    it("does not treat asset-backed income as cash impact", () => {
       expect(
         calculateActivityCashImpact(
           createActivity({
