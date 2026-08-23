@@ -202,7 +202,7 @@ impl ActivityService {
         }
         asset_id
             .and_then(|asset_id| self.asset_service.get_asset_by_id(asset_id).ok())
-            .map(|asset| asset.contract_multiplier())
+            .map(|asset| ActivityEconomicsResolver::asset_unit_multiplier(&asset))
             .unwrap_or(Decimal::ONE)
     }
 

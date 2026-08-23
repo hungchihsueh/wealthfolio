@@ -4,6 +4,7 @@ use crate::activities::{
     ACTIVITY_TYPE_SELL, ACTIVITY_TYPE_SPLIT, ACTIVITY_TYPE_TAX, ACTIVITY_TYPE_TRANSFER_IN,
     ACTIVITY_TYPE_TRANSFER_OUT, ACTIVITY_TYPE_WITHDRAWAL,
 };
+use crate::assets::Asset;
 use crate::fx::currency::{normalize_amount, normalize_currency_code};
 use crate::portfolio::valuation::ExternalFlowSource;
 use crate::quotes::Quote;
@@ -170,6 +171,19 @@ impl ResolvedActivityCash {
 }
 
 impl ActivityEconomicsResolver {
+    /// Unit multiplier used only for activity cash totals. Bond quotes are
+    /// commonly percentages of par, but that convention must not affect
+    /// portfolio-wide asset valuation.
+    pub fn asset_unit_multiplier(asset: &Asset) -> Decimal {
+        if asset.is_bond() {
+            asset
+                .explicit_contract_multiplier()
+                .unwrap_or_else(|| Decimal::new(1, 2))
+        } else {
+            asset.contract_multiplier()
+        }
+    }
+
     pub fn resolve_cash(activity: &Activity, unit_multiplier: Decimal) -> ResolvedActivityCash {
         Self::resolve_cash_inputs(ActivityCashInputs {
             activity_type: activity.effective_type(),
@@ -202,8 +216,13 @@ impl ActivityEconomicsResolver {
         let charges = fee + tax;
         let expected_amount = Self::derived_cash_amount(inputs, fee, tax);
         let supplied_amount = inputs.amount.map(|amount| amount.abs());
-        let amount = supplied_amount.or(expected_amount);
-        let amount_was_derived = supplied_amount.is_none() && amount.is_some();
+        let amount = match supplied_amount {
+            Some(amount) if amount.is_zero() => expected_amount.or(Some(amount)),
+            Some(amount) => Some(amount),
+            None => expected_amount,
+        };
+        let amount_was_derived =
+            expected_amount.is_some() && supplied_amount.is_none_or(|amount| amount.is_zero());
 
         let signed_cash_effect = amount
             .map(|amount| match inputs.activity_type {
@@ -655,6 +674,7 @@ impl ActivityEconomicsResolver {
 #[cfg(test)]
 mod cash_tests {
     use super::*;
+    use crate::assets::InstrumentType;
     use rust_decimal_macros::dec;
 
     fn inputs(activity_type: &'static str) -> ActivityCashInputs<'static> {
@@ -668,6 +688,30 @@ mod cash_tests {
             tax: Some(dec!(2)),
             unit_multiplier: Decimal::ONE,
         }
+    }
+
+    #[test]
+    fn bond_multiplier_is_scoped_to_activity_cash() {
+        let bond = Asset {
+            instrument_type: Some(InstrumentType::Bond),
+            ..Default::default()
+        };
+
+        assert_eq!(bond.contract_multiplier(), Decimal::ONE);
+        assert_eq!(
+            ActivityEconomicsResolver::asset_unit_multiplier(&bond),
+            dec!(0.01)
+        );
+
+        let configured_bond = Asset {
+            instrument_type: Some(InstrumentType::Bond),
+            metadata: Some(serde_json::json!({ "contractMultiplier": "0.02" })),
+            ..Default::default()
+        };
+        assert_eq!(
+            ActivityEconomicsResolver::asset_unit_multiplier(&configured_bond),
+            dec!(0.02)
+        );
     }
 
     #[test]

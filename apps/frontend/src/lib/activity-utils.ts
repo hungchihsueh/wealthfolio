@@ -474,8 +474,9 @@ export const resolveActivityCash = (activity: ActivityDetails): ResolvedActivity
   if (expectedAmount != null && expectedAmount <= 0) expectedAmount = null;
 
   const rawStoredAmount = activity.amount == null ? null : Number(activity.amount);
-  const suppliedAmount =
+  let suppliedAmount =
     rawStoredAmount != null && Number.isFinite(rawStoredAmount) ? Math.abs(rawStoredAmount) : null;
+  if (suppliedAmount === 0 && expectedAmount != null) suppliedAmount = null;
   const amount = suppliedAmount ?? expectedAmount;
 
   let grossAmount: number | null = null;

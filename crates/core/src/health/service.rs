@@ -27,9 +27,6 @@ use crate::lots::LotRepositoryTrait;
 use crate::portfolio::economic_events::{ActivityEconomicsResolver, BasisStatus};
 use crate::portfolio::holdings::{HoldingType, HoldingsServiceTrait};
 use crate::portfolio::performance::is_external_transfer;
-use crate::portfolio::snapshot::holdings_calculator::economics::{
-    gross_trade_amount, AssetPositionInfo,
-};
 use crate::portfolio::snapshot::{
     max_snapshot_read_date, min_supported_snapshot_date, validate_snapshot_read_date,
     AccountStateSnapshot, HoldingsTimeline, Position, SnapshotServiceTrait,
@@ -835,7 +832,7 @@ async fn gather_activity_cash_issues(
                 .asset_id
                 .as_ref()
                 .and_then(|asset_id| assets_by_id.get(asset_id))
-                .map(Asset::contract_multiplier)
+                .map(ActivityEconomicsResolver::asset_unit_multiplier)
                 .unwrap_or(Decimal::ONE);
             let multiplier = activity
                 .metadata
@@ -1937,16 +1934,13 @@ fn missing_valuation_issue(
 }
 
 fn health_sell_net_proceeds(activity: &Activity, asset: Option<&Asset>) -> Decimal {
-    // Mirrors the holdings calculator's sell cash booking
-    // (`gross_trade_amount(..) - fee - tax`, see handlers/trades.rs); only
-    // `is_bond` and `contract_multiplier` affect the gross amount.
-    let mut asset_info = AssetPositionInfo::fallback(&activity.currency);
-    if let Some(asset) = asset {
-        asset_info.is_bond = asset.is_bond();
-        asset_info.contract_multiplier = asset.contract_multiplier();
-    }
+    let multiplier = asset
+        .map(ActivityEconomicsResolver::asset_unit_multiplier)
+        .unwrap_or(Decimal::ONE);
 
-    gross_trade_amount(activity, &asset_info) - activity.fee_amt() - activity.tax_amt()
+    ActivityEconomicsResolver::resolve_cash(activity, multiplier)
+        .amount
+        .unwrap_or_default()
 }
 
 fn transfer_leg_detail(

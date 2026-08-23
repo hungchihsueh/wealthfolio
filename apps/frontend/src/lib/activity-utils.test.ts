@@ -326,6 +326,19 @@ describe("Activity Utilities", () => {
       expect(calculateActivityValue(activity)).toBe(2);
     });
 
+    it("should derive value when a legacy amount is zero", () => {
+      const activity = createActivity({
+        activityType: ActivityType.BUY,
+        quantity: "2",
+        unitPrice: "50",
+        amount: "0",
+        fee: "5",
+      });
+
+      expect(calculateActivityValue(activity)).toBe(105);
+      expect(calculateActivityCashImpact(activity)).toBe(-105);
+    });
+
     it("should derive dividend in kind value from quantity and FMV when amount is empty", () => {
       const activity = createActivity({
         activityType: ActivityType.DIVIDEND,

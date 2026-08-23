@@ -133,7 +133,7 @@ impl ContributionLimitService {
                 continue;
             }
 
-            let amount = activity.amount.ok_or_else(|| {
+            let amount = activity.amount.map(|amount| amount.abs()).ok_or_else(|| {
                 Error::Validation(ValidationError::MissingField(format!(
                     "Amount missing in {} activity",
                     activity.activity_type
@@ -690,6 +690,28 @@ mod tests {
             activity_type: "DEPOSIT".to_string(),
             activity_instant: default_instant(),
             amount: Some(dec!(1000)),
+            currency: "USD".to_string(),
+            metadata: None,
+            source_group_id: None,
+        }];
+        let service = make_service(activities);
+        let (start, end) = dates();
+
+        let result = service
+            .calculate_contributions_by_period(&["acc1".to_string()], start, end, "USD")
+            .unwrap();
+
+        assert_eq!(result.total, dec!(1000));
+        assert_eq!(result.by_account.get("acc1").unwrap().amount, dec!(1000));
+    }
+
+    #[test]
+    fn test_negative_legacy_deposit_uses_amount_magnitude() {
+        let activities = vec![ContributionActivity {
+            account_id: "acc1".to_string(),
+            activity_type: "DEPOSIT".to_string(),
+            activity_instant: default_instant(),
+            amount: Some(dec!(-1000)),
             currency: "USD".to_string(),
             metadata: None,
             source_group_id: None,

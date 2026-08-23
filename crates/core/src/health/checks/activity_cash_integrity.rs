@@ -49,7 +49,19 @@ impl ActivityCashIntegrityCheck {
         findings: &[ActivityCashIssueInfo],
         _ctx: &HealthContext,
     ) -> Vec<HealthIssue> {
-        findings.iter().map(issue_for_finding).collect()
+        [
+            ActivityCashIssueKind::Mismatch,
+            ActivityCashIssueKind::Missing,
+        ]
+        .into_iter()
+        .filter_map(|kind| {
+            let grouped: Vec<_> = findings
+                .iter()
+                .filter(|finding| finding.kind == kind)
+                .collect();
+            (!grouped.is_empty()).then(|| issue_for_findings(kind, &grouped))
+        })
+        .collect()
     }
 }
 
@@ -74,50 +86,63 @@ impl HealthCheck for ActivityCashIntegrityCheck {
     }
 }
 
-fn issue_for_finding(finding: &ActivityCashIssueInfo) -> HealthIssue {
-    let (code, severity, title, message) = match finding.kind {
+const MAX_DETAILS: usize = 20;
+
+fn issue_for_findings(
+    kind: ActivityCashIssueKind,
+    findings: &[&ActivityCashIssueInfo],
+) -> HealthIssue {
+    let (code, severity, title, message) = match kind {
         ActivityCashIssueKind::Mismatch => (
             "activity_cash_mismatch",
             Severity::Warning,
-            "Cash amount differs from trade details",
-            "Wealthfolio used the trusted cash amount. Review the imported total if the difference is unexpected.",
+            "Cash amounts differ from activity details",
+            "Wealthfolio used the trusted cash amounts. Review imported totals when the differences are unexpected.",
         ),
         ActivityCashIssueKind::Missing => (
             "activity_cash_amount_missing",
             Severity::Error,
-            "Activity total is missing",
-            "This posted activity has no cash amount and its total cannot be derived from the available fields.",
+            "Activity totals are missing",
+            "These posted activities have no cash amount and cannot be derived from the available fields.",
         ),
     };
     let navigate = NavigateAction {
         route: "/activities".to_string(),
-        query: Some(json!({
-            "activity": finding.activity_id,
-            "healthContext": "activity"
-        })),
-        label: "Review Transaction".to_string(),
+        query: Some(json!({ "healthContext": "activity" })),
+        label: "Review Activities".to_string(),
     };
-    let details = format_details(finding);
-    let data_hash = finding_hash(finding);
-    let diagnostic = diagnostic_for_finding(finding, code, severity, navigate.clone());
+    let affected_items = findings
+        .iter()
+        .take(MAX_DETAILS)
+        .map(|finding| {
+            AffectedItem::activity(
+                finding.activity_id.clone(),
+                format!(
+                    "{} · {} · {}",
+                    finding.activity_type, finding.date, finding.account_name
+                ),
+            )
+        })
+        .collect();
+    let diagnostics = findings
+        .iter()
+        .take(MAX_DETAILS)
+        .map(|finding| diagnostic_for_finding(finding, code, severity))
+        .collect();
+    let details = format_group_details(kind, findings.len());
+    let data_hash = findings_hash(kind, findings);
 
     HealthIssue::builder()
-        .id(format!("{}:{}", code, finding.activity_id))
+        .id(code)
         .severity(severity)
         .category(HealthCategory::DataConsistency)
         .code(code)
         .title(title)
         .message(message)
-        .affected_count(1)
-        .affected_items(vec![AffectedItem::activity(
-            finding.activity_id.clone(),
-            format!(
-                "{} · {} · {}",
-                finding.activity_type, finding.date, finding.account_name
-            ),
-        )])
+        .affected_count(findings.len() as u32)
+        .affected_items(affected_items)
         .navigate_action(navigate)
-        .diagnostics(vec![diagnostic])
+        .diagnostics(diagnostics)
         .details(details)
         .data_hash(data_hash)
         .build()
@@ -127,7 +152,6 @@ fn diagnostic_for_finding(
     finding: &ActivityCashIssueInfo,
     code: &str,
     severity: Severity,
-    navigate: NavigateAction,
 ) -> HealthDiagnostic {
     let mut diagnostic =
         HealthDiagnostic::new(code.to_ascii_uppercase(), code, format_details(finding))
@@ -142,7 +166,6 @@ fn diagnostic_for_finding(
                         urlencoding::encode(&finding.activity_id)
                     )),
             )
-            .navigate(true, navigate)
             .evidence(Evidence::new("Currency", finding.currency.clone()))
             .evidence(Evidence::new("Quantity", decimal_text(finding.quantity)))
             .evidence(Evidence::new(
@@ -195,6 +218,23 @@ fn format_details(finding: &ActivityCashIssueInfo) -> String {
     }
 }
 
+fn format_group_details(kind: ActivityCashIssueKind, count: usize) -> String {
+    let description = match kind {
+        ActivityCashIssueKind::Mismatch => {
+            "have trusted totals that differ from their quantity, price, fees, or taxes"
+        }
+        ActivityCashIssueKind::Missing => {
+            "have no usable total and cannot be derived from their available fields"
+        }
+    };
+    let shown = count.min(MAX_DETAILS);
+    if shown == count {
+        format!("{count} activities {description}.")
+    } else {
+        format!("{count} activities {description}. Showing the first {shown}.")
+    }
+}
+
 fn finding_hash(finding: &ActivityCashIssueInfo) -> String {
     let mut hasher = DefaultHasher::new();
     finding.activity_id.hash(&mut hasher);
@@ -221,6 +261,15 @@ fn finding_hash(finding: &ActivityCashIssueInfo) -> String {
         .hash(&mut hasher);
     finding.fee.to_string().hash(&mut hasher);
     finding.tax.to_string().hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+fn findings_hash(kind: ActivityCashIssueKind, findings: &[&ActivityCashIssueInfo]) -> String {
+    let mut hasher = DefaultHasher::new();
+    kind.hash(&mut hasher);
+    for finding in findings {
+        finding_hash(finding).hash(&mut hasher);
+    }
     format!("{:x}", hasher.finish())
 }
 
@@ -262,13 +311,13 @@ mod tests {
             .details
             .as_deref()
             .unwrap()
-            .contains("Wealthfolio used the trusted cash amount"));
+            .contains("trusted totals"));
         assert_eq!(
             issues[0]
                 .navigate_action
                 .as_ref()
                 .map(|action| action.label.as_str()),
-            Some("Review Transaction")
+            Some("Review Activities")
         );
     }
 
@@ -297,6 +346,40 @@ mod tests {
         assert_eq!(
             issues[0].code.as_deref(),
             Some("activity_cash_amount_missing")
+        );
+    }
+
+    #[test]
+    fn findings_are_grouped_by_kind() {
+        let findings: Vec<_> = (0..25)
+            .map(|index| ActivityCashIssueInfo {
+                kind: ActivityCashIssueKind::Mismatch,
+                activity_id: format!("activity-{index}"),
+                account_name: "Brokerage".to_string(),
+                activity_type: "BUY".to_string(),
+                date: NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
+                currency: "USD".to_string(),
+                trusted_amount: Some(dec!(1)),
+                expected_amount: Some(dec!(2)),
+                difference: Some(dec!(-1)),
+                quantity: Some(dec!(1)),
+                unit_price: Some(dec!(2)),
+                fee: Decimal::ZERO,
+                tax: Decimal::ZERO,
+            })
+            .collect();
+
+        let issues = ActivityCashIntegrityCheck::new().analyze(&findings, &context());
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].affected_count, 25);
+        assert_eq!(
+            issues[0].affected_items.as_ref().map(Vec::len),
+            Some(MAX_DETAILS)
+        );
+        assert_eq!(
+            issues[0].diagnostics.as_ref().map(Vec::len),
+            Some(MAX_DETAILS)
         );
     }
 }

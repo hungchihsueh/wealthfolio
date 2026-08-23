@@ -23,6 +23,7 @@ use wealthfolio_core::activities::{
 };
 use wealthfolio_core::assets::{Asset, InstrumentType};
 use wealthfolio_core::limits::ContributionActivity;
+use wealthfolio_core::portfolio::economic_events::ActivityEconomicsResolver;
 use wealthfolio_core::quotes::store::QuoteStore;
 use wealthfolio_core::{Error, Result};
 
@@ -611,15 +612,15 @@ impl ActivityRepository {
                 .map_err(StorageError::from)?
                 .into_iter()
                 .map(|(id, instrument_type, metadata)| {
-                    let multiplier = Asset {
+                    let asset = Asset {
                         instrument_type: instrument_type
                             .as_deref()
                             .and_then(InstrumentType::from_db_str),
                         metadata: metadata.and_then(|raw| serde_json::from_str(&raw).ok()),
                         ..Default::default()
-                    }
-                    .contract_multiplier()
-                    .to_string();
+                    };
+                    let multiplier =
+                        ActivityEconomicsResolver::asset_unit_multiplier(&asset).to_string();
                     (id, multiplier)
                 })
                 .collect()
@@ -2102,7 +2103,6 @@ impl ActivityRepositoryTrait for ActivityRepository {
                 activities::account_id,
                 activities::activity_type,
                 activities::activity_date,
-                activities::asset_id,
                 activities::amount,
                 activities::quantity,
                 activities::unit_price,
@@ -2117,59 +2117,11 @@ impl ActivityRepositoryTrait for ActivityRepository {
                 Option<String>,
                 Option<String>,
                 Option<String>,
-                Option<String>,
                 String,
                 Option<String>,
                 Option<String>,
             )>(&mut conn)
             .map_err(ActivityError::from)?;
-
-        let quote_requests: Vec<(String, NaiveDate)> = results
-            .iter()
-            .filter_map(
-                |(_, activity_type, activity_date, asset_id, amount, _, _, _, _, _)| {
-                    if activity_type != ACTIVITY_TYPE_TRANSFER_IN || amount.is_some() {
-                        return None;
-                    }
-                    let asset_id = asset_id
-                        .as_deref()
-                        .filter(|asset_id| !is_cash_symbol(asset_id))?;
-                    let activity_date =
-                        Self::parse_activity_instant_utc(activity_date)?.date_naive();
-                    Some((asset_id.to_string(), activity_date))
-                },
-            )
-            .collect();
-        let quotes_by_request = MarketDataRepository::new(self.pool.clone(), self.writer.clone())
-            .get_latest_quotes_for_asset_dates(&quote_requests)?;
-        let requested_asset_ids: Vec<String> = quote_requests
-            .iter()
-            .map(|(asset_id, _)| asset_id.clone())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        let multiplier_by_asset: HashMap<String, Decimal> = if requested_asset_ids.is_empty() {
-            HashMap::new()
-        } else {
-            assets::table
-                .filter(assets::id.eq_any(&requested_asset_ids))
-                .select((assets::id, assets::instrument_type, assets::metadata))
-                .load::<(String, Option<String>, Option<String>)>(&mut conn)
-                .map_err(StorageError::from)?
-                .into_iter()
-                .map(|(id, instrument_type, metadata)| {
-                    let multiplier = Asset {
-                        instrument_type: instrument_type
-                            .as_deref()
-                            .and_then(InstrumentType::from_db_str),
-                        metadata: metadata.and_then(|raw| serde_json::from_str(&raw).ok()),
-                        ..Default::default()
-                    }
-                    .contract_multiplier();
-                    (id, multiplier)
-                })
-                .collect()
-        };
 
         // Convert to ContributionActivity structs
         let activities = results
@@ -2179,7 +2131,6 @@ impl ActivityRepositoryTrait for ActivityRepository {
                     account_id,
                     activity_type,
                     activity_date_str,
-                    asset_id,
                     amount_str,
                     quantity_str,
                     unit_price_str,
@@ -2189,41 +2140,18 @@ impl ActivityRepositoryTrait for ActivityRepository {
                 )| {
                     let activity_instant = Self::parse_activity_instant_utc(&activity_date_str)?;
 
-                    let (amount, currency) = match amount_str {
-                        Some(amount) => (Decimal::from_str(&amount).ok(), currency),
+                    let amount = match amount_str {
+                        Some(amount) => Decimal::from_str(&amount).ok(),
                         None if activity_type == ACTIVITY_TYPE_TRANSFER_IN => {
                             let quantity =
                                 quantity_str.and_then(|value| Decimal::from_str(&value).ok());
-                            if let Some(asset_id) = asset_id
-                                .as_deref()
-                                .filter(|asset_id| !is_cash_symbol(asset_id))
-                            {
-                                let request = (asset_id.to_string(), activity_instant.date_naive());
-                                let quote = quotes_by_request.get(&request);
-                                let multiplier = multiplier_by_asset
-                                    .get(asset_id)
-                                    .copied()
-                                    .unwrap_or(Decimal::ONE);
-                                (
-                                    quantity.zip(quote).map(|(quantity, quote)| {
-                                        quantity.abs() * quote.close.abs() * multiplier
-                                    }),
-                                    quote
-                                        .map(|quote| quote.currency.clone())
-                                        .unwrap_or(currency),
-                                )
-                            } else {
-                                let unit_price =
-                                    unit_price_str.and_then(|value| Decimal::from_str(&value).ok());
-                                (
-                                    quantity
-                                        .zip(unit_price)
-                                        .map(|(quantity, price)| quantity.abs() * price.abs()),
-                                    currency,
-                                )
-                            }
+                            let unit_price =
+                                unit_price_str.and_then(|value| Decimal::from_str(&value).ok());
+                            quantity
+                                .zip(unit_price)
+                                .map(|(quantity, price)| quantity * price)
                         }
-                        None => (None, currency),
+                        None => None,
                     };
 
                     Some(ContributionActivity {
@@ -3310,54 +3238,24 @@ mod tests {
             .execute(&mut conn)
             .expect("set securities account type");
             diesel::sql_query(
-                "INSERT INTO assets
-                 (id, kind, name, display_code, metadata, is_active, quote_mode, quote_ccy,
-                  instrument_type, instrument_symbol, created_at, updated_at)
-                 VALUES
-                 ('contribution-equity', 'INVESTMENT', 'Contribution Equity', 'CEQ', NULL, 1,
-                  'MARKET', 'USD', 'EQUITY', 'CEQ', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-                 ('contribution-option', 'INVESTMENT', 'Contribution Option', 'COPT',
-                  '{\"contractMultiplier\":10}', 1, 'MARKET', 'USD', 'OPTION', 'COPT',
-                  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-            )
-            .execute(&mut conn)
-            .expect("insert contribution assets");
-            diesel::sql_query(
-                "INSERT INTO quotes
-                 (id, asset_id, day, source, close, currency, created_at, timestamp)
-                 VALUES
-                 ('contribution-equity-quote', 'contribution-equity', '2025-06-13', 'YAHOO',
-                  '40', 'USD', CURRENT_TIMESTAMP, '2025-06-13T16:00:00Z'),
-                 ('contribution-option-quote', 'contribution-option', '2025-06-15', 'YAHOO',
-                  '6', 'USD', CURRENT_TIMESTAMP, '2025-06-15T16:00:00Z')",
-            )
-            .execute(&mut conn)
-            .expect("insert transfer-date quotes");
-            diesel::sql_query(
                 "INSERT INTO activities
-                 (id, account_id, asset_id, activity_type, status, activity_date, quantity, unit_price,
+                 (id, account_id, activity_type, status, activity_date, quantity, unit_price,
                   amount, currency, metadata, source_system, is_user_modified, needs_review,
                   created_at, updated_at)
                  VALUES
-                 ('external-transfer-in', 'registered-account', 'contribution-equity',
-                  'TRANSFER_IN', 'POSTED',
+                 ('external-transfer-in', 'registered-account', 'TRANSFER_IN', 'POSTED',
                   '2025-06-15T12:00:00Z', '10', '25', NULL, 'USD',
                   '{\"flow\":{\"is_external\":true}}', 'MANUAL', 0, 0,
                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-                 ('external-option-transfer-in', 'registered-account', 'contribution-option',
-                  'TRANSFER_IN', 'POSTED',
-                  '2025-06-15T12:00:00Z', '1', '5', NULL, 'USD',
-                  '{\"flow\":{\"is_external\":true}}', 'MANUAL', 0, 0,
-                  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-                 ('internal-transfer-out', 'registered-account', NULL, 'TRANSFER_OUT', 'POSTED',
+                 ('internal-transfer-out', 'registered-account', 'TRANSFER_OUT', 'POSTED',
                   '2025-07-15T12:00:00Z', '5', '20', NULL, 'USD',
                   '{\"flow\":{\"is_external\":true}}',
                   'MANUAL', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-                 ('internal-transfer-in', 'second-registered-account', NULL, 'TRANSFER_IN', 'POSTED',
+                 ('internal-transfer-in', 'second-registered-account', 'TRANSFER_IN', 'POSTED',
                   '2025-07-15T12:00:00Z', '5', '20', NULL, 'USD',
                   '{\"flow\":{\"is_external\":true}}',
                   'MANUAL', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-                 ('unflagged-transfer-in', 'second-registered-account', NULL, 'TRANSFER_IN', 'POSTED',
+                 ('unflagged-transfer-in', 'second-registered-account', 'TRANSFER_IN', 'POSTED',
                   '2025-08-15T12:00:00Z', '4', '25', NULL, 'USD', NULL, 'MANUAL', 0, 0,
                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
             )
@@ -3394,65 +3292,14 @@ mod tests {
             .calculate_deposits_for_contribution_limit("registered-limit", "USD")
             .expect("calculate deposits");
 
-        // Equity uses transfer-date FMV (10 × 40), not book basis (10 × 25).
-        // The mini option also applies its canonical multiplier (1 × 6 × 10).
-        assert_eq!(deposits.total, Decimal::from(460));
+        assert_eq!(deposits.total, Decimal::from(250));
         assert_eq!(
             deposits.by_account["registered-account"].amount,
-            Decimal::from(460)
+            Decimal::from(250)
         );
         assert!(!deposits
             .by_account
             .contains_key("second-registered-account"));
-    }
-
-    #[tokio::test]
-    async fn contribution_activity_does_not_fall_back_to_security_book_basis() {
-        let (pool, writer) = setup_db();
-        let repo = ActivityRepository::new(pool.clone(), writer);
-        let mut conn = get_connection(&pool).expect("conn");
-        insert_account(&mut conn, "registered-no-quote");
-        diesel::update(accounts::table.filter(accounts::id.eq("registered-no-quote")))
-            .set(accounts::account_type.eq("SECURITIES"))
-            .execute(&mut conn)
-            .expect("set account type");
-        diesel::sql_query(
-            "INSERT INTO assets
-             (id, kind, name, display_code, metadata, is_active, quote_mode, quote_ccy,
-              instrument_type, instrument_symbol, created_at, updated_at)
-             VALUES ('no-quote-equity', 'INVESTMENT', 'No Quote Equity', 'NQE', NULL, 1,
-                     'MARKET', 'USD', 'EQUITY', 'NQE', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-        )
-        .execute(&mut conn)
-        .expect("insert asset");
-        diesel::sql_query(
-            "INSERT INTO activities
-             (id, account_id, asset_id, activity_type, status, activity_date, quantity,
-              unit_price, amount, currency, metadata, source_system, is_user_modified,
-              needs_review, created_at, updated_at)
-             VALUES ('no-quote-transfer', 'registered-no-quote', 'no-quote-equity',
-                     'TRANSFER_IN', 'POSTED', '2025-06-15T12:00:00Z', '10', '25', NULL,
-                     'USD', '{\"flow\":{\"is_external\":true}}', 'MANUAL', 0, 0,
-                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-        )
-        .execute(&mut conn)
-        .expect("insert transfer");
-        drop(conn);
-
-        let rows = repo
-            .get_contribution_activities(
-                &[String::from("registered-no-quote")],
-                DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
-                    .unwrap()
-                    .with_timezone(&Utc),
-                DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-                    .unwrap()
-                    .with_timezone(&Utc),
-            )
-            .expect("contribution activities");
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].amount, None);
     }
 
     fn insert_holdings_snapshot(

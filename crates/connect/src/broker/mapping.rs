@@ -435,7 +435,7 @@ pub fn map_broker_activity(
         NewActivity::canonicalize_subtype_for_activity(&activity_type, subtype.as_deref());
 
     // Calculate needs_review flag
-    let needs_review_flag = needs_review(activity);
+    let mut needs_review_flag = needs_review(activity);
 
     // Build metadata JSON
     let metadata = build_activity_metadata(activity);
@@ -607,6 +607,7 @@ pub fn map_broker_activity(
     } else {
         Decimal::ONE
     };
+    let source_cash_amount = amount;
     let amount = if fx_rate.is_none_or(|rate| rate == Decimal::ONE) {
         ActivityEconomicsResolver::reconcile_imported_trade_amount(
             ActivityCashInputs {
@@ -624,6 +625,9 @@ pub fn map_broker_activity(
     } else {
         amount
     };
+    if amount != source_cash_amount {
+        needs_review_flag = true;
+    }
 
     // Determine status
     let status = if needs_review_flag {
@@ -817,6 +821,10 @@ mod tests {
         assert_eq!(mapped.amount.unwrap().round_dp(4), decimal("500.0000"));
         assert_eq!(mapped.fee.unwrap().round_dp(4), decimal("4.9500"));
         assert_eq!(mapped.tax, None);
+        assert_eq!(
+            mapped.status,
+            Some(wealthfolio_core::activities::ActivityStatus::Draft)
+        );
 
         let metadata: serde_json::Value =
             serde_json::from_str(mapped.metadata.as_deref().unwrap()).unwrap();
@@ -839,6 +847,10 @@ mod tests {
         let mapped = map_test_activity(&activity);
 
         assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("995.00"));
+        assert_eq!(
+            mapped.status,
+            Some(wealthfolio_core::activities::ActivityStatus::Draft)
+        );
         let asset = mapped.asset.expect("bond activity should produce an asset");
         assert_eq!(asset.kind.as_deref(), Some("BOND"));
         assert_eq!(asset.instrument_type.as_deref(), Some("BOND"));
@@ -863,6 +875,10 @@ mod tests {
         let mapped = map_test_activity(&activity);
 
         assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("605.00"));
+        assert_eq!(
+            mapped.status,
+            Some(wealthfolio_core::activities::ActivityStatus::Posted)
+        );
     }
 
     #[test]
@@ -882,6 +898,10 @@ mod tests {
 
         assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("5304.41"));
         assert_eq!(mapped.fee.unwrap().round_dp(2), decimal("0.11"));
+        assert_eq!(
+            mapped.status,
+            Some(wealthfolio_core::activities::ActivityStatus::Posted)
+        );
     }
 
     #[test]
@@ -900,6 +920,10 @@ mod tests {
         let mapped = map_test_activity(&activity);
 
         assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("995.00"));
+        assert_eq!(
+            mapped.status,
+            Some(wealthfolio_core::activities::ActivityStatus::Draft)
+        );
     }
 
     #[test]

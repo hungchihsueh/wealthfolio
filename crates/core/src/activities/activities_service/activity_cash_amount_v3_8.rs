@@ -1,7 +1,7 @@
 //! One-time activity cash amount migration.
 //!
 //! Keep the complete migration workflow in this file so it can be removed as a
-//! unit once databases created before v4 are no longer supported.
+//! unit once databases created before v3.8 are no longer supported.
 
 use std::collections::{HashMap, HashSet};
 
@@ -18,7 +18,6 @@ use crate::{
         ACTIVITY_TYPE_SPLIT,
     },
     errors::{Error, Result},
-    fx::currency::currency_rounding_tolerance,
     portfolio::{
         economic_events::{ActivityCashInputs, ActivityEconomicsResolver},
         snapshot::{SnapshotRecalcMode, SnapshotServiceTrait},
@@ -75,41 +74,27 @@ pub(super) async fn migrate_amounts(service: &ActivityService) -> Result<usize> 
     for activity in activities {
         if activity.effective_type() == ACTIVITY_TYPE_SPLIT
             || ActivityEconomicsResolver::is_security_transfer(&activity)
+            || activity.amount.is_some_and(|amount| !amount.is_zero())
         {
             continue;
         }
 
-        let migrated_amount = if let Some(amount) = activity.amount {
-            let magnitude = amount.abs();
-            let reconciled = if should_reconcile_broker_trade(&activity) {
-                migration_cash_unit_multiplier(service, &activity, &mut asset_multipliers)
-                    .and_then(|unit_multiplier| {
-                        ActivityEconomicsResolver::reconcile_imported_trade_amount(
-                            ActivityCashInputs {
-                                activity_type: activity.effective_type(),
-                                is_security_transfer: false,
-                                quantity: activity.quantity,
-                                unit_price: activity.unit_price,
-                                amount: Some(magnitude),
-                                fee: activity.fee,
-                                tax: activity.tax,
-                                unit_multiplier,
-                            },
-                            currency_rounding_tolerance(&activity.currency),
-                        )
-                    })
-                    .unwrap_or(magnitude)
-            } else {
-                magnitude
-            };
-            (reconciled != amount).then_some(reconciled)
-        } else {
+        let migrated_amount =
             migration_cash_unit_multiplier(service, &activity, &mut asset_multipliers)
-                .and_then(|multiplier| {
-                    ActivityEconomicsResolver::resolve_cash(&activity, multiplier).amount
+                .and_then(|unit_multiplier| {
+                    ActivityEconomicsResolver::resolve_cash_inputs(ActivityCashInputs {
+                        activity_type: activity.effective_type(),
+                        is_security_transfer: false,
+                        quantity: activity.quantity,
+                        unit_price: activity.unit_price,
+                        amount: None,
+                        fee: activity.fee,
+                        tax: activity.tax,
+                        unit_multiplier,
+                    })
+                    .amount
                 })
-                .filter(|amount| *amount > Decimal::ZERO)
-        };
+                .filter(|amount| *amount > Decimal::ZERO);
 
         if let Some(amount) = migrated_amount {
             let idempotency_key = activity.idempotency_key.as_ref().and_then(|key| {
@@ -195,22 +180,9 @@ fn migration_cash_unit_multiplier(
         .asset_service
         .get_asset_by_id(asset_id)
         .ok()
-        .map(|asset| asset.contract_multiplier());
+        .map(|asset| ActivityEconomicsResolver::asset_unit_multiplier(&asset));
     asset_multipliers.insert(asset_id.to_string(), multiplier);
     multiplier
-}
-
-fn should_reconcile_broker_trade(activity: &Activity) -> bool {
-    !activity.is_user_modified
-        && matches!(
-            activity.effective_type(),
-            ACTIVITY_TYPE_BUY | ACTIVITY_TYPE_SELL
-        )
-        && activity
-            .source_system
-            .as_deref()
-            .is_some_and(|source| source.eq_ignore_ascii_case("SNAPTRADE"))
-        && activity.fx_rate.is_none_or(|rate| rate == Decimal::ONE)
 }
 
 #[async_trait]
@@ -274,7 +246,7 @@ impl MigrationBackend for ServiceMigrationBackend<'_> {
 async fn run_safely(backend: &dyn MigrationBackend) -> bool {
     match try_run(backend).await {
         Ok(Some(migrated)) => {
-            info!("Canonicalized cash amounts for {migrated} activities");
+            info!("Backfilled missing cash amounts for {migrated} activities");
             true
         }
         Ok(None) => true,

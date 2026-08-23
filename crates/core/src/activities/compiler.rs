@@ -415,12 +415,12 @@ mod tests {
                 expected_buy_price: None,
             },
             Case {
-                name: "supplied zero amount remains authoritative",
+                name: "supplied zero amount derives when details are complete",
                 unit_price: Some(dec!(20)),
                 amount: Some(dec!(0)),
                 fee: None,
                 tax: None,
-                expected_income: Some(dec!(0)),
+                expected_income: Some(dec!(100)),
                 expected_buy_price: Some(dec!(20)),
             },
         ];
@@ -645,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_staking_reward_trusts_explicit_zero_amount() {
+    fn test_compile_staking_reward_derives_explicit_zero_amount() {
         let compiler = DefaultActivityCompiler::new();
         let mut activity = create_test_activity();
         activity.activity_type = ACTIVITY_TYPE_INTEREST.to_string();
@@ -658,8 +658,8 @@ mod tests {
         let result = compiler.compile(&activity).unwrap();
 
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].amount, Some(dec!(0)));
-        assert_eq!(result[1].amount, Some(dec!(0)));
+        assert_eq!(result[0].amount, Some(dec!(20)));
+        assert_eq!(result[1].amount, Some(dec!(20)));
         assert_eq!(result[1].unit_price, Some(dec!(2000)));
     }
 

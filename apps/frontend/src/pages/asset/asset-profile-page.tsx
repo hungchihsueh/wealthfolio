@@ -761,7 +761,7 @@ export const AssetProfilePage = () => {
         return null;
       }
       const amount = Number(activity.amount ?? 0);
-      return Number.isFinite(amount) ? sum + amount : sum;
+      return Number.isFinite(amount) ? sum + Math.abs(amount) : sum;
     }, 0);
     const income = holding?.income?.local != null ? Number(holding.income.local) : fallbackIncome;
     const realizedLots = assetLots.filter(

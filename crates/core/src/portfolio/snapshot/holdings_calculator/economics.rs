@@ -24,7 +24,6 @@ pub(crate) struct AssetPositionInfo {
     pub(crate) currency: String,
     pub(crate) is_alternative: bool,
     pub(crate) contract_multiplier: Decimal,
-    pub(crate) is_bond: bool,
     pub(crate) allows_negative_lots: bool,
     pub(crate) requires_explicit_short_intent: bool,
 }
@@ -37,7 +36,6 @@ impl AssetPositionInfo {
             currency: activity_currency.to_string(),
             is_alternative: false,
             contract_multiplier: Decimal::ONE,
-            is_bond: false,
             allows_negative_lots: false,
             requires_explicit_short_intent: false,
         }

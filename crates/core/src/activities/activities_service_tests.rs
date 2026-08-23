@@ -4,7 +4,10 @@ mod tests {
     use crate::activities::activities_model::*;
     use crate::activities::{
         ActivityRepositoryTrait, ActivityService, ActivityServiceTrait, ImportRun,
-        ImportRunRepositoryTrait, ImportRunStatus, ACTIVITY_TYPE_BUY, ACTIVITY_TYPE_SELL,
+        ImportRunRepositoryTrait, ImportRunStatus, ACTIVITY_TYPE_BUY, ACTIVITY_TYPE_CREDIT,
+        ACTIVITY_TYPE_DEPOSIT, ACTIVITY_TYPE_DIVIDEND, ACTIVITY_TYPE_FEE, ACTIVITY_TYPE_INTEREST,
+        ACTIVITY_TYPE_SELL, ACTIVITY_TYPE_TAX, ACTIVITY_TYPE_TRANSFER_IN,
+        ACTIVITY_TYPE_TRANSFER_OUT, ACTIVITY_TYPE_WITHDRAWAL,
     };
     use crate::assets::{
         normalize_quote_ccy_code, parse_crypto_pair_symbol, parse_symbol_with_exchange_suffix,
@@ -2557,27 +2560,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cash_amount_migration_preserves_explicit_hashes_and_skips_missing_assets() {
+    async fn cash_amount_migration_only_backfills_missing_or_zero_amounts() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());
-        asset_service.set_get_asset_by_id_error("asset unavailable");
+        asset_service.add_asset(create_test_asset("equity", "USD"));
         let activity_repository = Arc::new(MockActivityRepository::new());
 
-        let mut generated = create_stored_activity("generated", "acc-1", None);
-        generated.amount = Some(dec!(-100));
-        generated.idempotency_key =
-            Some(crate::activities::idempotency::compute_activity_idempotency_key(&generated));
-        let mut explicit = create_stored_activity("explicit", "acc-1", None);
-        explicit.amount = Some(dec!(-50));
-        explicit.idempotency_key = Some("a".repeat(64));
+        let mut missing = create_stored_activity("missing", "acc-1", Some("equity"));
+        missing.amount = None;
+        missing.idempotency_key =
+            Some(crate::activities::idempotency::compute_activity_idempotency_key(&missing));
+        let mut zero = create_stored_activity("zero", "acc-1", Some("equity"));
+        zero.amount = Some(Decimal::ZERO);
+        zero.fee = Some(dec!(5));
+        let mut negative = create_stored_activity("negative", "acc-1", None);
+        negative.amount = Some(dec!(-50));
+        negative.idempotency_key = Some("a".repeat(64));
+        let positive = create_stored_activity("positive", "acc-1", None);
         let mut unresolved = create_stored_activity("unresolved", "acc-1", Some("missing-option"));
         unresolved.amount = None;
         let mut unresolved_same_asset =
             create_stored_activity("unresolved-same-asset", "acc-1", Some("missing-option"));
         unresolved_same_asset.amount = None;
 
-        activity_repository.add_activity(generated);
-        activity_repository.add_activity(explicit);
+        activity_repository.add_activity(missing);
+        activity_repository.add_activity(zero);
+        activity_repository.add_activity(negative);
+        activity_repository.add_activity(positive);
         activity_repository.add_activity(unresolved);
         activity_repository.add_activity(unresolved_same_asset);
 
@@ -2590,31 +2599,35 @@ mod tests {
         );
 
         assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 2);
-        assert_eq!(asset_service.get_asset_by_id_call_count(), 1);
+        assert_eq!(asset_service.get_asset_by_id_call_count(), 2);
         let rows = activity_repository.activities.lock().unwrap().clone();
-        let generated = rows.iter().find(|row| row.id == "generated").unwrap();
-        let explicit = rows.iter().find(|row| row.id == "explicit").unwrap();
+        let missing = rows.iter().find(|row| row.id == "missing").unwrap();
+        let zero = rows.iter().find(|row| row.id == "zero").unwrap();
+        let negative = rows.iter().find(|row| row.id == "negative").unwrap();
+        let positive = rows.iter().find(|row| row.id == "positive").unwrap();
         let unresolved = rows.iter().find(|row| row.id == "unresolved").unwrap();
-        let expected_generated_key =
-            crate::activities::idempotency::compute_activity_idempotency_key(generated);
+        let expected_missing_key =
+            crate::activities::idempotency::compute_activity_idempotency_key(missing);
 
-        assert_eq!(generated.amount, Some(dec!(100)));
+        assert_eq!(missing.amount, Some(dec!(100)));
         assert_eq!(
-            generated.idempotency_key.as_deref(),
-            Some(expected_generated_key.as_str())
+            missing.idempotency_key.as_deref(),
+            Some(expected_missing_key.as_str())
         );
-        assert_eq!(explicit.amount, Some(dec!(50)));
+        assert_eq!(zero.amount, Some(dec!(105)));
+        assert_eq!(negative.amount, Some(dec!(-50)));
         assert_eq!(
-            explicit.idempotency_key.as_deref(),
+            negative.idempotency_key.as_deref(),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
+        assert_eq!(positive.amount, Some(dec!(100)));
         assert_eq!(unresolved.amount, None);
         assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 0);
-        assert_eq!(asset_service.get_asset_by_id_call_count(), 2);
+        assert_eq!(asset_service.get_asset_by_id_call_count(), 3);
     }
 
     #[tokio::test]
-    async fn cash_amount_migration_reconciles_only_unambiguous_snaptrade_gross_trades() {
+    async fn cash_amount_migration_preserves_all_nonzero_broker_amounts() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());
         asset_service.add_asset(create_test_asset("equity", "USD"));
@@ -2731,8 +2744,8 @@ mod tests {
             Arc::new(MockQuoteService),
         );
 
-        assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 2);
-        assert_eq!(asset_service.get_asset_by_id_call_count(), 2);
+        assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 0);
+        assert_eq!(asset_service.get_asset_by_id_call_count(), 0);
         let rows = activity_repository.activities.lock().unwrap().clone();
         let amount = |id: &str| {
             rows.iter()
@@ -2740,15 +2753,167 @@ mod tests {
                 .and_then(|activity| activity.amount)
                 .unwrap()
         };
-        assert_eq!(amount("gross-buy"), dec!(500.00));
-        assert_eq!(amount("gross-sell"), dec!(995));
+        assert_eq!(amount("gross-buy"), dec!(495.05));
+        assert_eq!(amount("gross-sell"), dec!(1000));
         assert_eq!(amount("final-option-buy"), dec!(605));
         assert_eq!(amount("final-rounded-sell"), dec!(5304.41));
         assert_eq!(amount("adjusted-zero-fee-buy"), dec!(0.30));
         assert_eq!(amount("user-modified-gross"), dec!(1000));
         assert_eq!(amount("gross-with-fx"), dec!(1000));
         assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 0);
-        assert_eq!(asset_service.get_asset_by_id_call_count(), 4);
+        assert_eq!(asset_service.get_asset_by_id_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cash_amount_migration_preserves_nonzero_amounts_for_every_supported_type() {
+        let account_service = Arc::new(MockAccountService::new());
+        let asset_service = Arc::new(MockAssetService::new());
+        let activity_repository = Arc::new(MockActivityRepository::new());
+        let activity_types = [
+            ACTIVITY_TYPE_BUY,
+            ACTIVITY_TYPE_SELL,
+            ACTIVITY_TYPE_DIVIDEND,
+            ACTIVITY_TYPE_INTEREST,
+            ACTIVITY_TYPE_CREDIT,
+            ACTIVITY_TYPE_DEPOSIT,
+            ACTIVITY_TYPE_TRANSFER_IN,
+            ACTIVITY_TYPE_WITHDRAWAL,
+            ACTIVITY_TYPE_TRANSFER_OUT,
+            ACTIVITY_TYPE_FEE,
+            ACTIVITY_TYPE_TAX,
+        ];
+
+        for (index, activity_type) in activity_types.iter().enumerate() {
+            let mut activity = create_stored_activity(&format!("nonzero-{index}"), "acc-1", None);
+            activity.activity_type = (*activity_type).to_string();
+            activity.amount = Some(if index % 2 == 0 {
+                Decimal::from(index as i64 + 1)
+            } else {
+                -Decimal::from(index as i64 + 1)
+            });
+            activity_repository.add_activity(activity);
+        }
+        let before: HashMap<_, _> = activity_repository
+            .activities
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|activity| (activity.id.clone(), activity.amount))
+            .collect();
+        let service = ActivityService::new(
+            activity_repository.clone(),
+            account_service,
+            asset_service.clone(),
+            Arc::new(MockFxService::new()),
+            Arc::new(MockQuoteService),
+        );
+
+        assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 0);
+        assert_eq!(asset_service.get_asset_by_id_call_count(), 0);
+        let after: HashMap<_, _> = activity_repository
+            .activities
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|activity| (activity.id.clone(), activity.amount))
+            .collect();
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn cash_amount_migration_derives_supported_activity_types() {
+        let account_service = Arc::new(MockAccountService::new());
+        let asset_service = Arc::new(MockAssetService::new());
+        asset_service.add_asset(create_test_asset("equity", "USD"));
+        let activity_repository = Arc::new(MockActivityRepository::new());
+
+        let cases = [
+            ("buy", ACTIVITY_TYPE_BUY, Some("equity"), dec!(23)),
+            ("sell", ACTIVITY_TYPE_SELL, Some("equity"), dec!(17)),
+            ("dividend", ACTIVITY_TYPE_DIVIDEND, Some("equity"), dec!(17)),
+            ("interest", ACTIVITY_TYPE_INTEREST, Some("equity"), dec!(17)),
+            ("credit", ACTIVITY_TYPE_CREDIT, None, dec!(17)),
+            ("deposit", ACTIVITY_TYPE_DEPOSIT, None, dec!(17)),
+            ("transfer-in", ACTIVITY_TYPE_TRANSFER_IN, None, dec!(17)),
+            ("withdrawal", ACTIVITY_TYPE_WITHDRAWAL, None, dec!(23)),
+            ("transfer-out", ACTIVITY_TYPE_TRANSFER_OUT, None, dec!(23)),
+        ];
+        for (index, (id, activity_type, asset_id, _)) in cases.iter().enumerate() {
+            let mut activity = create_stored_activity(id, "acc-1", *asset_id);
+            activity.activity_type = (*activity_type).to_string();
+            activity.quantity = Some(dec!(2));
+            activity.unit_price = Some(dec!(10));
+            activity.amount = (index % 2 == 0).then_some(Decimal::ZERO);
+            activity.fee = Some(dec!(1));
+            activity.tax = Some(dec!(2));
+            activity_repository.add_activity(activity);
+        }
+
+        let mut fee = create_stored_activity("fee", "acc-1", None);
+        fee.activity_type = ACTIVITY_TYPE_FEE.to_string();
+        fee.quantity = None;
+        fee.unit_price = None;
+        fee.amount = Some(Decimal::ZERO);
+        fee.fee = Some(dec!(4));
+        activity_repository.add_activity(fee);
+
+        let mut tax = create_stored_activity("tax", "acc-1", None);
+        tax.activity_type = ACTIVITY_TYPE_TAX.to_string();
+        tax.quantity = None;
+        tax.unit_price = None;
+        tax.amount = None;
+        tax.tax = Some(dec!(5));
+        activity_repository.add_activity(tax);
+
+        let mut legacy_tax = create_stored_activity("legacy-tax", "acc-1", None);
+        legacy_tax.activity_type = ACTIVITY_TYPE_TAX.to_string();
+        legacy_tax.quantity = None;
+        legacy_tax.unit_price = None;
+        legacy_tax.amount = Some(Decimal::ZERO);
+        legacy_tax.fee = Some(dec!(6));
+        legacy_tax.tax = None;
+        activity_repository.add_activity(legacy_tax);
+
+        let service = ActivityService::new(
+            activity_repository.clone(),
+            account_service,
+            asset_service,
+            Arc::new(MockFxService::new()),
+            Arc::new(MockQuoteService),
+        );
+
+        assert_eq!(
+            service.migrate_activity_cash_amounts().await.unwrap(),
+            cases.len() + 3
+        );
+        let rows = activity_repository.activities.lock().unwrap();
+        for (id, _, _, expected) in cases {
+            assert_eq!(
+                rows.iter()
+                    .find(|row| row.id == id)
+                    .and_then(|row| row.amount),
+                Some(expected),
+                "{id}"
+            );
+        }
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == "fee")
+                .and_then(|row| row.amount),
+            Some(dec!(4))
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == "tax")
+                .and_then(|row| row.amount),
+            Some(dec!(5))
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == "legacy-tax")
+                .and_then(|row| row.amount),
+            Some(dec!(6))
+        );
     }
 
     struct TransferActivitySeed<'a> {
