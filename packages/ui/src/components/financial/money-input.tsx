@@ -141,7 +141,7 @@ const MoneyInput = React.forwardRef<HTMLInputElement, MoneyInputProps>(
           // Keep incomplete decimal input (for example `0.`) locally while
           // the form continues receiving its numeric value.
           setEditingValue(values.value);
-          if (sourceInfo.source === "prop") return;
+          if (!sourceInfo.event) return;
           lastInputValueRef.current = values.floatValue;
           // Prefer onValueChange if provided
           if (onValueChange) {
