@@ -6,9 +6,10 @@ import { ActivityType } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { useFormContext } from "react-hook-form";
 import { useTranslation } from "react-i18next";
+import type { NewActivityFormValues } from "../forms/schemas";
 
 export function MobileActivityTypeStep() {
-  const { control } = useFormContext();
+  const { control, setValue } = useFormContext<NewActivityFormValues>();
   const { t } = useTranslation();
 
   const activityTypes = [
@@ -113,7 +114,19 @@ export function MobileActivityTypeStep() {
           render={({ field }) => (
             <FormItem>
               <FormControl>
-                <RadioGroup onValueChange={field.onChange} value={field.value as string}>
+                <RadioGroup
+                  onValueChange={(activityType) => {
+                    if (field.value && field.value !== activityType) {
+                      setValue("amount", undefined, {
+                        shouldDirty: false,
+                        shouldTouch: false,
+                        shouldValidate: false,
+                      });
+                    }
+                    field.onChange(activityType);
+                  }}
+                  value={field.value as string}
+                >
                   <div className="space-y-6 pb-4">
                     {activityTypes.map((category) => (
                       <div key={category.category}>

@@ -212,7 +212,9 @@ interface ActivityLogicConfig {
 
 function suppliedAmount(activity: Partial<ActivityImport>): number | undefined {
   const amount = toNum(activity.amount);
-  return amount === undefined ? undefined : Math.abs(amount);
+  if (amount === undefined) return undefined;
+  const magnitude = Math.abs(amount);
+  return magnitude > 0 ? magnitude : undefined;
 }
 
 function derivedCashAmount(
@@ -238,10 +240,7 @@ function isImportedCashTransfer(activity: Partial<ActivityImport>): boolean {
 const activityLogicMap: Partial<Record<ActivityType, ActivityLogicConfig>> = {
   [ActivityType.BUY]: {
     calculateSymbol: (activity) => activity.symbol, // Keep original symbol
-    calculateAmount: (activity) => {
-      const amt = toNum(activity.amount);
-      return amt !== undefined ? Math.abs(amt) : undefined;
-    },
+    calculateAmount: suppliedAmount,
     calculateFee: (activity) => {
       const f = toNum(activity.fee);
       return f ? Math.abs(f) : 0;
@@ -249,10 +248,7 @@ const activityLogicMap: Partial<Record<ActivityType, ActivityLogicConfig>> = {
   },
   [ActivityType.SELL]: {
     calculateSymbol: (activity) => activity.symbol,
-    calculateAmount: (activity) => {
-      const amt = toNum(activity.amount);
-      return amt !== undefined ? Math.abs(amt) : undefined;
-    },
+    calculateAmount: suppliedAmount,
     calculateFee: (activity) => {
       const f = toNum(activity.fee);
       return f ? Math.abs(f) : 0;

@@ -598,7 +598,7 @@ fn normalize_synced_activity_cash_rows_tx(
         activity.tax = activity.tax.map(|value| value.abs());
         activity.amount = activity.amount.map(|value| value.abs());
 
-        if activity.amount.is_none()
+        if activity.amount.is_none_or(|amount| amount.is_zero())
             && activity.effective_type() != ACTIVITY_TYPE_SPLIT
             && !ActivityEconomicsResolver::is_security_transfer(&activity)
         {
@@ -8134,6 +8134,64 @@ mod tests {
         assert_ne!(
             stored.idempotency_key.as_deref(),
             Some(legacy_idempotency_key.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_derives_zero_activity_amount_after_asset_replay() {
+        let (pool, writer) = setup_db();
+        {
+            let mut conn = get_connection(&pool).expect("conn");
+            insert_account_for_test(&mut conn, "acc-zero-amount").expect("insert account");
+            insert_asset_kind_for_test(&mut conn, "asset-zero-amount", "INVESTMENT")
+                .expect("insert asset");
+        }
+        let repo = AppSyncRepository::new(pool.clone(), writer);
+
+        let applied = repo
+            .apply_remote_event_lww(
+                SyncEntity::Activity,
+                "activity-zero-amount".to_string(),
+                SyncOperation::Create,
+                "evt-zero-amount".to_string(),
+                "2026-02-15T00:00:00Z".to_string(),
+                1,
+                serde_json::json!({
+                    "id": "activity-zero-amount",
+                    "accountId": "acc-zero-amount",
+                    "assetId": "asset-zero-amount",
+                    "activityType": "BUY",
+                    "status": "POSTED",
+                    "activityDate": "2026-02-14",
+                    "quantity": "-2",
+                    "unitPrice": "-5.5",
+                    "amount": "0",
+                    "fee": -0.5,
+                    "tax": "-0.25",
+                    "currency": "USD",
+                    "idempotencyKey": "provider:zero-amount",
+                    "isUserModified": 0,
+                    "needsReview": 0,
+                    "createdAt": "2026-02-15T00:00:00Z",
+                    "updatedAt": "2026-02-15T00:00:00Z"
+                }),
+            )
+            .await
+            .expect("apply activity with zero amount");
+        assert!(applied);
+
+        let mut conn = get_connection(&pool).expect("conn");
+        let stored = activities::table
+            .find("activity-zero-amount")
+            .select(ActivityDB::as_select())
+            .first::<ActivityDB>(&mut conn)
+            .expect("load derived activity");
+        let stored: Activity = stored.into();
+
+        assert_eq!(stored.amount, Some(Decimal::new(1175, 2)));
+        assert_eq!(
+            stored.idempotency_key.as_deref(),
+            Some("provider:zero-amount")
         );
     }
 

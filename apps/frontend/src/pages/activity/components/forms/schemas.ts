@@ -216,7 +216,12 @@ export const incomeActivitySchema = baseActivitySchema.extend({
 export const otherActivitySchema = baseActivitySchema.extend({
   activityType: z.enum([ActivityType.SPLIT, ActivityType.TAX, ActivityType.FEE]),
   assetId: z.string().min(1, { message: "Please select a security" }).optional(),
-  amount: z.coerce.number().min(0).optional(),
+  amount: z.coerce
+    .number({
+      required_error: "Please enter a valid amount.",
+      invalid_type_error: "Amount must be a positive number.",
+    })
+    .positive(),
   quantity: z.coerce.number().nonnegative().optional(),
   fee: z.coerce
     .number({

@@ -664,7 +664,7 @@ fn validate_draft(draft: &ActivityDraft) -> ValidationResult {
 }
 
 fn canonical_magnitude(value: Option<f64>) -> Option<f64> {
-    value.map(f64::abs)
+    value.map(f64::abs).filter(|value| *value > 0.0)
 }
 
 #[async_trait::async_trait]
@@ -738,6 +738,8 @@ mod tests {
     #[test]
     fn canonical_magnitude_preserves_missing_values_and_normalizes_signs() {
         assert_eq!(canonical_magnitude(None), None);
+        assert_eq!(canonical_magnitude(Some(0.0)), None);
+        assert_eq!(canonical_magnitude(Some(-0.0)), None);
         assert_eq!(canonical_magnitude(Some(-12.5)), Some(12.5));
         assert_eq!(canonical_magnitude(Some(12.5)), Some(12.5));
     }

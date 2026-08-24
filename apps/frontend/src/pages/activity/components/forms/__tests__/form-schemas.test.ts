@@ -1446,6 +1446,22 @@ describe("Form Schemas Validation", () => {
   });
 
   describe("newActivitySchema extended mobile edit types", () => {
+    it("requires a positive amount for mobile fee, tax, and split activities", () => {
+      for (const activityType of [ActivityType.FEE, ActivityType.TAX, ActivityType.SPLIT]) {
+        const base = {
+          accountId: "acc-123",
+          activityType,
+          activityDate: new Date(),
+          currency: "USD",
+        };
+
+        expect(newActivitySchema.safeParse(base).success).toBe(false);
+        expect(newActivitySchema.safeParse({ ...base, amount: -25 }).success).toBe(false);
+        expect(newActivitySchema.safeParse({ ...base, amount: 0 }).success).toBe(false);
+        expect(newActivitySchema.safeParse({ ...base, amount: 25 }).success).toBe(true);
+      }
+    });
+
     it("accepts credit activities", () => {
       const result = newActivitySchema.safeParse({
         accountId: "acc-123",

@@ -179,6 +179,36 @@ describe("validation-utils", () => {
       expect(activity.tax).toBe(2.0);
     });
 
+    it("should treat zero BUY and SELL amounts as missing so the backend can derive them", () => {
+      for (const activityType of ["BUY", "SELL"]) {
+        const result = validateActivityImport(
+          [
+            {
+              lineNumber: "1",
+              date: "2024-01-01T00:00:00.000Z",
+              symbol: "AAPL",
+              activityType,
+              quantity: "10",
+              unitPrice: "150.00",
+              amount: "0",
+              fee: "5.00",
+              tax: "2.00",
+              currency: "USD",
+            },
+          ],
+          testMapping,
+          "test-account",
+          "USD",
+        );
+
+        expect(result.activities).toHaveLength(1);
+        expect(result.activities[0].isValid).toBe(true);
+        expect(result.activities[0].amount).toBeUndefined();
+        expect(result.activities[0].quantity).toBe(10);
+        expect(result.activities[0].unitPrice).toBe(150);
+      }
+    });
+
     it("should apply symbol mappings using trimmed CSV symbol keys", () => {
       const testData = [
         {

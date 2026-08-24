@@ -24,7 +24,9 @@ use crate::assets::{Asset, AssetKind, AssetServiceTrait, QuoteMode};
 use crate::errors::Result;
 use crate::fx::currency::currency_rounding_tolerance;
 use crate::lots::LotRepositoryTrait;
-use crate::portfolio::economic_events::{ActivityEconomicsResolver, BasisStatus};
+use crate::portfolio::economic_events::{
+    ActivityEconomicsResolver, BasisStatus, ResolvedActivityCash,
+};
 use crate::portfolio::holdings::{HoldingType, HoldingsServiceTrait};
 use crate::portfolio::performance::is_external_transfer;
 use crate::portfolio::snapshot::{
@@ -847,31 +849,11 @@ async fn gather_activity_cash_issues(
                 .filter(|value| *value > Decimal::ZERO)
                 .unwrap_or(asset_multiplier);
             let resolved = ActivityEconomicsResolver::resolve_cash(activity, multiplier);
-            let checks_expected_cash =
-                matches!(activity_type, ACTIVITY_TYPE_BUY | ACTIVITY_TYPE_SELL)
-                    || NewActivity::is_asset_backed_income_subtype(
-                        activity_type,
-                        activity.subtype.as_deref(),
-                    );
-            let kind = if checks_expected_cash {
-                match (activity.amount, resolved.expected_amount) {
-                    (Some(trusted), Some(expected))
-                        if (trusted.abs() - expected).abs()
-                            > currency_rounding_tolerance(&activity.currency) =>
-                    {
-                        ActivityCashIssueKind::Mismatch
-                    }
-                    _ if resolved.amount.is_none_or(|amount| amount <= Decimal::ZERO) => {
-                        ActivityCashIssueKind::Missing
-                    }
-                    _ => return None,
-                }
-            } else if resolved.amount.is_none_or(|amount| amount <= Decimal::ZERO) {
-                ActivityCashIssueKind::Missing
-            } else {
-                return None;
-            };
-            let trusted_amount = activity.amount.map(|amount| amount.abs());
+            let kind = classify_activity_cash_issue(activity, resolved)?;
+            let trusted_amount = activity
+                .amount
+                .map(|amount| amount.abs())
+                .filter(|amount| !amount.is_zero());
 
             Some(ActivityCashIssueInfo {
                 kind,
@@ -895,6 +877,34 @@ async fn gather_activity_cash_issues(
             })
         })
         .collect()
+}
+
+fn classify_activity_cash_issue(
+    activity: &Activity,
+    resolved: ResolvedActivityCash,
+) -> Option<ActivityCashIssueKind> {
+    let activity_type = activity.effective_type();
+    let trusted_amount = activity
+        .amount
+        .map(|amount| amount.abs())
+        .filter(|amount| !amount.is_zero());
+    let checks_expected_cash = matches!(activity_type, ACTIVITY_TYPE_BUY | ACTIVITY_TYPE_SELL)
+        || NewActivity::is_asset_backed_income_subtype(activity_type, activity.subtype.as_deref());
+
+    if checks_expected_cash
+        && trusted_amount
+            .zip(resolved.expected_amount)
+            .is_some_and(|(trusted, expected)| {
+                (trusted - expected).abs() > currency_rounding_tolerance(&activity.currency)
+            })
+    {
+        return Some(ActivityCashIssueKind::Mismatch);
+    }
+
+    resolved
+        .amount
+        .is_none_or(|amount| amount <= Decimal::ZERO)
+        .then_some(ActivityCashIssueKind::Missing)
 }
 
 fn effective_timezone<'a>(
@@ -3206,6 +3216,33 @@ mod tests {
         assert_eq!(
             health_sell_net_proceeds(&taxed_sell, Some(&health_asset("aapl"))),
             dec!(980)
+        );
+    }
+
+    #[test]
+    fn activity_cash_health_treats_zero_as_missing_not_trusted() {
+        let mut derivable = buy_activity("zero-buy", "brokerage", "aapl", Some(dec!(10)));
+        derivable.amount = Some(Decimal::ZERO);
+        derivable.fee = Some(dec!(1));
+        let resolved = ActivityEconomicsResolver::resolve_cash(&derivable, Decimal::ONE);
+
+        assert_eq!(resolved.amount, Some(dec!(21)));
+        assert_eq!(classify_activity_cash_issue(&derivable, resolved), None);
+
+        let mut mismatched = derivable.clone();
+        mismatched.amount = Some(dec!(19));
+        let resolved = ActivityEconomicsResolver::resolve_cash(&mismatched, Decimal::ONE);
+        assert_eq!(
+            classify_activity_cash_issue(&mismatched, resolved),
+            Some(ActivityCashIssueKind::Mismatch)
+        );
+
+        let mut unresolved = derivable;
+        unresolved.unit_price = None;
+        let resolved = ActivityEconomicsResolver::resolve_cash(&unresolved, Decimal::ONE);
+        assert_eq!(
+            classify_activity_cash_issue(&unresolved, resolved),
+            Some(ActivityCashIssueKind::Missing)
         );
     }
 

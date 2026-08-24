@@ -789,6 +789,36 @@ mod cash_tests {
     }
 
     #[test]
+    fn missing_and_zero_amounts_share_the_supported_derivation_contract() {
+        let cases = [
+            (ACTIVITY_TYPE_BUY, dec!(23), dec!(-23), dec!(20)),
+            (ACTIVITY_TYPE_SELL, dec!(17), dec!(17), dec!(20)),
+            (ACTIVITY_TYPE_DEPOSIT, dec!(17), dec!(17), dec!(20)),
+            (ACTIVITY_TYPE_DIVIDEND, dec!(17), dec!(17), dec!(20)),
+            (ACTIVITY_TYPE_INTEREST, dec!(17), dec!(17), dec!(20)),
+            (ACTIVITY_TYPE_CREDIT, dec!(17), dec!(17), dec!(20)),
+            (ACTIVITY_TYPE_TRANSFER_IN, dec!(17), dec!(17), dec!(20)),
+            (ACTIVITY_TYPE_WITHDRAWAL, dec!(23), dec!(-23), dec!(20)),
+            (ACTIVITY_TYPE_TRANSFER_OUT, dec!(23), dec!(-23), dec!(20)),
+            (ACTIVITY_TYPE_FEE, dec!(1), dec!(-1), dec!(1)),
+            (ACTIVITY_TYPE_TAX, dec!(2), dec!(-2), dec!(2)),
+        ];
+
+        for (activity_type, amount, signed_cash, gross_amount) in cases {
+            for supplied_amount in [None, Some(Decimal::ZERO)] {
+                let mut case = inputs(activity_type);
+                case.amount = supplied_amount;
+                let resolved = ActivityEconomicsResolver::resolve_cash_inputs(case);
+
+                assert_eq!(resolved.amount, Some(amount), "{activity_type}");
+                assert_eq!(resolved.signed_cash_effect, signed_cash, "{activity_type}");
+                assert_eq!(resolved.gross_amount, Some(gross_amount), "{activity_type}");
+                assert!(resolved.amount_was_derived, "{activity_type}");
+            }
+        }
+    }
+
+    #[test]
     fn external_cash_flow_separates_final_cash_from_signed_gross() {
         let mut deposit = inputs(ACTIVITY_TYPE_DEPOSIT);
         deposit.quantity = None;

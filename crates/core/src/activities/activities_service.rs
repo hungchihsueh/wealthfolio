@@ -228,7 +228,9 @@ impl ActivityService {
         activity: &mut NewActivity,
         resolved_asset_id: Option<&str>,
     ) {
-        if activity.amount.is_some() || activity.activity_type == ACTIVITY_TYPE_SPLIT {
+        if activity.amount.is_some_and(|amount| !amount.is_zero())
+            || activity.activity_type == ACTIVITY_TYPE_SPLIT
+        {
             return;
         }
 
@@ -240,7 +242,7 @@ impl ActivityService {
             ),
             quantity: activity.quantity,
             unit_price: activity.unit_price,
-            amount: None,
+            amount: activity.amount,
             fee: activity.fee,
             tax: activity.tax,
             unit_multiplier: self.cash_unit_multiplier(
@@ -311,8 +313,10 @@ impl ActivityService {
             return;
         }
 
-        let explicitly_supplied = matches!(activity.amount, Some(Some(_)));
-        let existing_amount_is_trusted = activity.amount.is_none() && existing.amount.is_some();
+        let explicitly_supplied =
+            matches!(activity.amount, Some(Some(amount)) if !amount.is_zero());
+        let existing_amount_is_trusted =
+            activity.amount.is_none() && existing.amount.is_some_and(|amount| !amount.is_zero());
         if explicitly_supplied || existing_amount_is_trusted {
             return;
         }
@@ -325,7 +329,7 @@ impl ActivityService {
             ),
             quantity: activity.quantity.unwrap_or(existing.quantity),
             unit_price: activity.unit_price.unwrap_or(existing.unit_price),
-            amount: None,
+            amount: activity.amount.flatten(),
             fee: activity.fee.unwrap_or(existing.fee),
             tax: activity.tax.unwrap_or(existing.tax),
             unit_multiplier: self.cash_unit_multiplier(
@@ -3456,7 +3460,11 @@ impl ActivityService {
             return;
         }
 
-        let Some(trusted_amount) = activity.amount.map(|amount| amount.abs()) else {
+        let Some(trusted_amount) = activity
+            .amount
+            .map(|amount| amount.abs())
+            .filter(|amount| !amount.is_zero())
+        else {
             return;
         };
         let multiplier = self.import_cash_unit_multiplier(activity);
@@ -5372,24 +5380,30 @@ impl ActivityServiceTrait for ActivityService {
             .map(NewActivity::from)
             .collect();
 
-        for (new_act, src) in new_activities.iter_mut().zip(source_slice.iter()) {
+        let mut has_cash_validation_errors = false;
+        for (position, (new_act, src)) in new_activities
+            .iter_mut()
+            .zip(source_slice.iter())
+            .enumerate()
+        {
             new_act.subtype = NewActivity::canonicalize_subtype_for_activity(
                 &new_act.activity_type,
                 new_act.subtype.as_deref(),
             );
             Self::normalize_new_activity_economic_signs(new_act);
-            if new_act.amount.is_none() && new_act.activity_type != ACTIVITY_TYPE_SPLIT {
-                let transfer_asset_id = new_act.get_symbol_id().or_else(|| {
-                    let symbol = src.symbol.trim();
-                    (!symbol.is_empty()).then_some(symbol)
-                });
+            let transfer_asset_id = new_act.get_symbol_id().or_else(|| {
+                let symbol = src.symbol.trim();
+                (!symbol.is_empty()).then_some(symbol)
+            });
+            let is_security_transfer =
+                is_securities_transfer(&new_act.activity_type, transfer_asset_id);
+            if new_act.amount.is_none_or(|amount| amount.is_zero())
+                && new_act.activity_type != ACTIVITY_TYPE_SPLIT
+            {
                 new_act.amount =
                     ActivityEconomicsResolver::resolve_cash_inputs(ActivityCashInputs {
                         activity_type: &new_act.activity_type,
-                        is_security_transfer: is_securities_transfer(
-                            &new_act.activity_type,
-                            transfer_asset_id,
-                        ),
+                        is_security_transfer,
                         quantity: new_act.quantity,
                         unit_price: new_act.unit_price,
                         amount: None,
@@ -5399,7 +5413,43 @@ impl ActivityServiceTrait for ActivityService {
                     })
                     .amount;
             }
+            if let Err(error) = Self::validate_cash_amount_contract(
+                &new_act.activity_type,
+                new_act.amount,
+                new_act.fee,
+                new_act.tax,
+                is_security_transfer,
+            ) {
+                if let Some((_, import_activity)) = import_activities_indexed.get_mut(position) {
+                    Self::add_activity_error(import_activity, "amount", &error.to_string());
+                }
+                has_cash_validation_errors = true;
+                continue;
+            }
             new_act.idempotency_key = self.build_import_idempotency_key(src, &new_act.account_id);
+        }
+
+        if has_cash_validation_errors {
+            let skipped = import_activities_indexed
+                .iter()
+                .filter(|(_, activity)| !activity.is_valid)
+                .count() as u32;
+            for (idx, activity) in import_activities_indexed {
+                ordered[idx] = Some(activity);
+            }
+            return Ok(ImportActivitiesResult {
+                activities: ordered.into_iter().flatten().collect(),
+                import_run_id: String::new(),
+                summary: ImportActivitiesSummary {
+                    total: total as u32,
+                    imported: 0,
+                    skipped,
+                    duplicates: 0,
+                    assets_created: 0,
+                    success: false,
+                    error_message: Some("Validation errors found in activities.".to_string()),
+                },
+            });
         }
 
         // ── 5. Partition hard duplicates before insert ───────────────────────

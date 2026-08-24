@@ -2590,15 +2590,21 @@ mod tests {
         activity_repository.add_activity(unresolved);
         activity_repository.add_activity(unresolved_same_asset);
 
+        let event_sink = Arc::new(MockDomainEventSink::new());
         let service = ActivityService::new(
             activity_repository.clone(),
             account_service,
             asset_service.clone(),
             Arc::new(MockFxService::new()),
             Arc::new(MockQuoteService),
-        );
+        )
+        .with_event_sink(event_sink.clone());
 
         assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 2);
+        assert!(
+            event_sink.events().is_empty(),
+            "the startup migration performs its own rebuild and must not queue another one"
+        );
         assert_eq!(asset_service.get_asset_by_id_call_count(), 2);
         let rows = activity_repository.activities.lock().unwrap().clone();
         let missing = rows.iter().find(|row| row.id == "missing").unwrap();
@@ -3164,6 +3170,75 @@ mod tests {
         assert_eq!(updated.amount, Some(dec!(100)));
         assert_eq!(updated.quantity, Some(dec!(2)));
         assert_eq!(updated.unit_price, Some(dec!(70)));
+    }
+
+    #[tokio::test]
+    async fn test_create_derives_explicit_zero_cash_amount() {
+        let account_service = Arc::new(MockAccountService::new());
+        account_service.add_account(create_test_account("acc-1", "USD"));
+        let activity_service = ActivityService::new(
+            Arc::new(MockActivityRepository::new()),
+            account_service,
+            Arc::new(MockAssetService::new()),
+            Arc::new(MockFxService::new()),
+            Arc::new(MockQuoteService),
+        );
+
+        let mut activity =
+            create_test_cash_create("zero-deposit", "acc-1", ACTIVITY_TYPE_DEPOSIT, "USD");
+        activity.quantity = Some(dec!(2));
+        activity.unit_price = Some(dec!(10));
+        activity.amount = Some(Decimal::ZERO);
+        activity.fee = Some(dec!(1));
+
+        let created = activity_service
+            .create_activity(activity)
+            .await
+            .expect("a zero placeholder should derive from the supplied cash details");
+
+        assert_eq!(created.amount, Some(dec!(19)));
+    }
+
+    #[tokio::test]
+    async fn test_update_derives_explicit_or_existing_zero_cash_amount() {
+        let account_service = Arc::new(MockAccountService::new());
+        account_service.add_account(create_test_account("acc-1", "USD"));
+        let activity_repository = Arc::new(MockActivityRepository::new());
+        for id in ["explicit-zero", "existing-zero"] {
+            let mut activity = create_stored_activity(id, "acc-1", None);
+            activity.activity_type = ACTIVITY_TYPE_DEPOSIT.to_string();
+            activity.quantity = Some(dec!(1));
+            activity.unit_price = Some(dec!(10));
+            activity.amount = Some(Decimal::ZERO);
+            activity.fee = Some(dec!(1));
+            activity_repository.add_activity(activity);
+        }
+        let activity_service = ActivityService::new(
+            activity_repository,
+            account_service,
+            Arc::new(MockAssetService::new()),
+            Arc::new(MockFxService::new()),
+            Arc::new(MockQuoteService),
+        );
+
+        for (id, amount) in [
+            ("explicit-zero", Some(Some(Decimal::ZERO))),
+            ("existing-zero", None),
+        ] {
+            let mut update = create_test_activity_update(id, "acc-1", None, "USD");
+            update.activity_type = ACTIVITY_TYPE_DEPOSIT.to_string();
+            update.quantity = Some(Some(dec!(2)));
+            update.unit_price = Some(Some(dec!(10)));
+            update.fee = Some(Some(dec!(1)));
+            update.amount = amount;
+
+            let updated = activity_service
+                .update_activity(update)
+                .await
+                .expect("a zero placeholder should be recalculated during update");
+
+            assert_eq!(updated.amount, Some(dec!(19)), "{id}");
+        }
     }
 
     #[tokio::test]
@@ -8599,7 +8674,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_import_allows_unknown_provider_subtype_label_and_derives_total() {
+    async fn test_import_derives_zero_total_without_a_false_trusted_amount_warning() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());
         let fx_service = Arc::new(MockFxService::new());
@@ -8626,7 +8701,7 @@ mod tests {
             currency: "USD".to_string(),
             fee: Some(dec!(1)),
             tax: Some(dec!(2)),
-            amount: None,
+            amount: Some(Decimal::ZERO),
             comment: None,
             account_id: Some("acc-1".to_string()),
             account_name: None,
@@ -8652,10 +8727,23 @@ mod tests {
             is_external: None,
         };
 
-        let result = activity_service
-            .import_activities(vec![option_buy])
+        let checked = activity_service
+            .check_activities_import(vec![option_buy])
             .await
-            .expect("import should canonicalize provider position subtype labels");
+            .expect("import check should accept a derivable zero placeholder");
+        assert!(checked[0].is_valid);
+        assert!(
+            checked[0]
+                .warnings
+                .as_ref()
+                .is_none_or(|warnings| !warnings.contains_key("amount")),
+            "zero is missing, not a trusted total that mismatches the details"
+        );
+
+        let result = activity_service
+            .import_activities(checked)
+            .await
+            .expect("import should derive the zero placeholder");
 
         assert!(result.summary.success);
         assert_eq!(result.summary.imported, 1);
@@ -8668,6 +8756,54 @@ mod tests {
             .expect("stored activities should be readable");
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].amount, Some(dec!(503)));
+
+        let unresolved_deposit = ActivityImport {
+            id: None,
+            date: "2024-01-16".to_string(),
+            symbol: String::new(),
+            activity_type: "DEPOSIT".to_string(),
+            quantity: None,
+            unit_price: None,
+            currency: "USD".to_string(),
+            fee: None,
+            tax: None,
+            amount: Some(Decimal::ZERO),
+            comment: None,
+            account_id: Some("acc-1".to_string()),
+            account_name: None,
+            symbol_name: None,
+            exchange_mic: None,
+            quote_ccy: None,
+            instrument_type: None,
+            quote_mode: None,
+            provider_id: None,
+            provider_symbol: None,
+            errors: None,
+            warnings: None,
+            duplicate_of_id: None,
+            duplicate_of_line_number: None,
+            is_draft: false,
+            is_valid: true,
+            line_number: Some(2),
+            fx_rate: None,
+            subtype: None,
+            asset_id: None,
+            isin: None,
+            force_import: false,
+            is_external: None,
+        };
+
+        let rejected = activity_service
+            .import_activities(vec![unresolved_deposit])
+            .await
+            .expect("invalid import rows should be returned for correction");
+        assert!(!rejected.summary.success);
+        assert_eq!(rejected.summary.imported, 0);
+        assert!(rejected.activities[0]
+            .errors
+            .as_ref()
+            .is_some_and(|errors| errors.contains_key("amount")));
+        assert_eq!(activity_repository.get_activities().unwrap().len(), 1);
     }
 
     #[tokio::test]

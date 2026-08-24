@@ -8338,6 +8338,12 @@ mod tests {
             (Decimal::ZERO, dec!(4), Decimal::ZERO)
         );
 
+        let zero_fee = activity_fixture(ActivityType::Fee, Decimal::ZERO, dec!(4));
+        assert_eq!(
+            PerformanceService::activity_attribution_components(&zero_fee, &ActivityType::Fee),
+            (Decimal::ZERO, dec!(4), Decimal::ZERO)
+        );
+
         let tax = activity_fixture(ActivityType::Tax, dec!(7), Decimal::ZERO);
         assert_eq!(
             PerformanceService::activity_attribution_components(&tax, &ActivityType::Tax),
@@ -8347,6 +8353,12 @@ mod tests {
         let mut explicit_tax = activity_fixture(ActivityType::Tax, Decimal::ZERO, Decimal::ZERO);
         explicit_tax.amount = None;
         explicit_tax.tax = Some(dec!(9));
+        assert_eq!(
+            PerformanceService::activity_attribution_components(&explicit_tax, &ActivityType::Tax),
+            (Decimal::ZERO, Decimal::ZERO, dec!(9))
+        );
+
+        explicit_tax.amount = Some(Decimal::ZERO);
         assert_eq!(
             PerformanceService::activity_attribution_components(&explicit_tax, &ActivityType::Tax),
             (Decimal::ZERO, Decimal::ZERO, dec!(9))

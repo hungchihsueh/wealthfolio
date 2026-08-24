@@ -69,7 +69,6 @@ pub(super) async fn migrate_amounts(service: &ActivityService) -> Result<usize> 
     let mut claimed_recomputed_keys = HashSet::new();
     let mut asset_multipliers = HashMap::new();
     let mut updates = Vec::new();
-    let mut changed_activities = Vec::new();
 
     for activity in activities {
         if activity.effective_type() == ACTIVITY_TYPE_SPLIT
@@ -120,7 +119,6 @@ pub(super) async fn migrate_amounts(service: &ActivityService) -> Result<usize> 
                 amount,
                 idempotency_key,
             });
-            changed_activities.push(activity);
         }
     }
 
@@ -128,26 +126,6 @@ pub(super) async fn migrate_amounts(service: &ActivityService) -> Result<usize> 
         .activity_repository
         .update_activity_amounts_for_migration(updates)
         .await?;
-    if changed > 0 {
-        let mut account_ids = HashSet::new();
-        let mut asset_ids = HashSet::new();
-        let mut currencies = HashSet::new();
-        for activity in &changed_activities {
-            ActivityService::add_activity_to_event_sets(
-                activity,
-                &mut account_ids,
-                &mut asset_ids,
-                &mut currencies,
-            );
-        }
-        service.emit_activities_changed(
-            account_ids.into_iter().collect(),
-            asset_ids.into_iter().collect(),
-            currencies.into_iter().collect(),
-            ActivityService::earliest_activity_at_utc(&changed_activities),
-        );
-    }
-
     Ok(changed)
 }
 

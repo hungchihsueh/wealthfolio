@@ -41,6 +41,7 @@ import { MobileActivitySteps } from "./mobile-activity-steps";
 import {
   allocateInternalSecurityTransferFee,
   getMobileActivityAssetId,
+  getMobileActivityAmount,
 } from "./mobile-activity-utils";
 
 interface MobileActivityFormProps {
@@ -365,7 +366,7 @@ export function MobileActivityForm({
       activityType: isValidMobileActivityType(activity?.activityType)
         ? activity.activityType
         : undefined,
-      amount: activity?.amount ? Number(activity.amount) : undefined,
+      amount: getMobileActivityAmount(activity),
       sourceAmount,
       destinationAmount,
       sourceCurrency: editingTransferIn

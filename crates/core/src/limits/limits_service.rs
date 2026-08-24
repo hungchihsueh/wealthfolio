@@ -133,12 +133,16 @@ impl ContributionLimitService {
                 continue;
             }
 
-            let amount = activity.amount.map(|amount| amount.abs()).ok_or_else(|| {
-                Error::Validation(ValidationError::MissingField(format!(
-                    "Amount missing in {} activity",
-                    activity.activity_type
-                )))
-            })?;
+            let amount = activity
+                .amount
+                .map(|amount| amount.abs())
+                .filter(|amount| !amount.is_zero())
+                .ok_or_else(|| {
+                    Error::Validation(ValidationError::MissingField(format!(
+                        "Amount missing in {} activity",
+                        activity.activity_type
+                    )))
+                })?;
 
             let activity_date = activity_date_in_tz(activity.activity_instant, tz);
 
@@ -725,6 +729,29 @@ mod tests {
 
         assert_eq!(result.total, dec!(1000));
         assert_eq!(result.by_account.get("acc1").unwrap().amount, dec!(1000));
+    }
+
+    #[test]
+    fn test_zero_deposit_is_not_a_valid_contribution_amount() {
+        let activities = vec![ContributionActivity {
+            account_id: "acc1".to_string(),
+            activity_type: "DEPOSIT".to_string(),
+            activity_instant: default_instant(),
+            amount: Some(Decimal::ZERO),
+            currency: "USD".to_string(),
+            metadata: None,
+            source_group_id: None,
+        }];
+        let service = make_service(activities);
+        let (start, end) = dates();
+
+        let error = service
+            .calculate_contributions_by_period(&["acc1".to_string()], start, end, "USD")
+            .expect_err("zero follows the same missing-amount contract as NULL");
+
+        assert!(error
+            .to_string()
+            .contains("Amount missing in DEPOSIT activity"));
     }
 
     #[test]

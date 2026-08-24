@@ -268,7 +268,7 @@ impl Activity {
 
     /// Get the charge amount for standalone charge handling.
     pub(crate) fn charge_amt_for(&self, activity_type: &ActivityType) -> Decimal {
-        if self.amount.is_some() {
+        if self.amount.is_some_and(|amount| !amount.is_zero()) {
             return self.amt();
         }
 
