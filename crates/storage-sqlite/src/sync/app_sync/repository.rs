@@ -571,7 +571,10 @@ fn normalize_synced_activity_cash_rows_tx(
             .into_iter()
             .map(|row| {
                 let asset: Asset = row.into();
-                (asset.id.clone(), asset.contract_multiplier())
+                (
+                    asset.id.clone(),
+                    ActivityEconomicsResolver::asset_unit_multiplier(&asset),
+                )
             })
             .collect::<HashMap<_, _>>()
     };
@@ -590,7 +593,9 @@ fn normalize_synced_activity_cash_rows_tx(
             activity.amount,
             activity.fee,
             activity.tax,
+            activity.metadata.clone(),
         );
+        let amount_was_missing = activity.amount.is_none_or(|amount| amount.is_zero());
 
         activity.quantity = activity.quantity.map(|value| value.abs());
         activity.unit_price = activity.unit_price.map(|value| value.abs());
@@ -625,12 +630,51 @@ fn normalize_synced_activity_cash_rows_tx(
             }
         }
 
+        let existing_amount_mode = activity
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/cash_amount/mode"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|mode| matches!(*mode, "calculated" | "custom"))
+            .map(str::to_string);
+        let normalized_amount_mode = if amount_was_missing {
+            "calculated".to_string()
+        } else {
+            existing_amount_mode
+                .clone()
+                .unwrap_or_else(|| "custom".to_string())
+        };
+        if existing_amount_mode.as_deref() != Some(normalized_amount_mode.as_str()) {
+            let metadata = activity
+                .metadata
+                .get_or_insert_with(|| serde_json::json!({}));
+            if !metadata.is_object() {
+                let legacy_metadata = metadata.clone();
+                *metadata = serde_json::json!({ "legacy_metadata": legacy_metadata });
+            }
+            if let Some(root) = metadata.as_object_mut() {
+                let cash_amount = root
+                    .entry("cash_amount")
+                    .or_insert_with(|| serde_json::json!({}));
+                if !cash_amount.is_object() {
+                    *cash_amount = serde_json::json!({});
+                }
+                if let Some(cash_amount) = cash_amount.as_object_mut() {
+                    cash_amount.insert(
+                        "mode".to_string(),
+                        serde_json::json!(normalized_amount_mode),
+                    );
+                }
+            }
+        }
+
         let normalized = (
             activity.quantity,
             activity.unit_price,
             activity.amount,
             activity.fee,
             activity.tax,
+            activity.metadata.clone(),
         );
         if original == normalized {
             continue;
@@ -650,6 +694,8 @@ fn normalize_synced_activity_cash_rows_tx(
                 activities_table::amount.eq(activity.amount.map(|value| value.to_string())),
                 activities_table::fee.eq(activity.fee.map(|value| value.to_string())),
                 activities_table::tax.eq(activity.tax.map(|value| value.to_string())),
+                activities_table::metadata
+                    .eq(activity.metadata.as_ref().map(serde_json::Value::to_string)),
                 activities_table::idempotency_key.eq(idempotency_key),
             ))
             .execute(conn)
@@ -5267,8 +5313,10 @@ mod tests {
                 activities::amount,
                 activities::fee,
                 activities::tax,
+                activities::metadata,
             ))
             .first::<(
+                Option<String>,
                 Option<String>,
                 Option<String>,
                 Option<String>,
@@ -5282,6 +5330,14 @@ mod tests {
         assert_eq!(stored.2.as_deref(), Some("11.5"));
         assert_eq!(stored.3.as_deref(), Some("1"));
         assert_eq!(stored.4.as_deref(), Some("0.5"));
+        let metadata: serde_json::Value = serde_json::from_str(stored.5.as_deref().unwrap_or("{}"))
+            .expect("valid restored metadata");
+        assert_eq!(
+            metadata
+                .pointer("/cash_amount/mode")
+                .and_then(serde_json::Value::as_str),
+            Some("calculated")
+        );
     }
 
     #[tokio::test]
@@ -8040,8 +8096,10 @@ mod tests {
                 activities::fee,
                 activities::tax,
                 activities::idempotency_key,
+                activities::metadata,
             ))
             .first::<(
+                Option<String>,
                 Option<String>,
                 Option<String>,
                 Option<String>,
@@ -8057,6 +8115,14 @@ mod tests {
         assert_eq!(stored.3.as_deref(), Some("0.5"));
         assert_eq!(stored.4.as_deref(), Some("0.25"));
         assert_eq!(stored.5.as_deref(), Some("provider:signed-activity"));
+        let metadata: serde_json::Value = serde_json::from_str(stored.6.as_deref().unwrap_or("{}"))
+            .expect("valid replay metadata");
+        assert_eq!(
+            metadata
+                .pointer("/cash_amount/mode")
+                .and_then(serde_json::Value::as_str),
+            Some("custom")
+        );
     }
 
     #[tokio::test]
@@ -8135,6 +8201,66 @@ mod tests {
             stored.idempotency_key.as_deref(),
             Some(legacy_idempotency_key.as_str())
         );
+        assert_eq!(
+            stored
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/cash_amount/mode"))
+                .and_then(serde_json::Value::as_str),
+            Some("calculated")
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_derives_bond_cash_with_quote_multiplier() {
+        let (pool, writer) = setup_db();
+        {
+            let mut conn = get_connection(&pool).expect("conn");
+            insert_account_for_test(&mut conn, "acc-bond-replay").expect("insert account");
+            insert_asset_kind_for_test(&mut conn, "asset-bond-replay", "INVESTMENT")
+                .expect("insert asset");
+            diesel::update(assets_table::table.find("asset-bond-replay"))
+                .set(assets_table::instrument_type.eq(Some("BOND".to_string())))
+                .execute(&mut conn)
+                .expect("mark replay asset as bond");
+        }
+        let repo = AppSyncRepository::new(pool.clone(), writer);
+
+        repo.apply_remote_event_lww(
+            SyncEntity::Activity,
+            "activity-bond-replay".to_string(),
+            SyncOperation::Create,
+            "evt-bond-replay".to_string(),
+            "2026-02-15T00:00:00Z".to_string(),
+            1,
+            serde_json::json!({
+                "id": "activity-bond-replay",
+                "accountId": "acc-bond-replay",
+                "assetId": "asset-bond-replay",
+                "activityType": "BUY",
+                "status": "POSTED",
+                "activityDate": "2026-02-14",
+                "quantity": "100",
+                "unitPrice": "98",
+                "amount": null,
+                "fee": "2",
+                "currency": "USD",
+                "isUserModified": 0,
+                "needsReview": 0,
+                "createdAt": "2026-02-15T00:00:00Z",
+                "updatedAt": "2026-02-15T00:00:00Z"
+            }),
+        )
+        .await
+        .expect("apply bond activity");
+
+        let mut conn = get_connection(&pool).expect("conn");
+        let amount = activities::table
+            .find("activity-bond-replay")
+            .select(activities::amount)
+            .first::<Option<String>>(&mut conn)
+            .expect("load bond replay amount");
+        assert_eq!(amount.as_deref(), Some("100.00"));
     }
 
     #[tokio::test]
@@ -8192,6 +8318,14 @@ mod tests {
         assert_eq!(
             stored.idempotency_key.as_deref(),
             Some("provider:zero-amount")
+        );
+        assert_eq!(
+            stored
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/cash_amount/mode"))
+                .and_then(serde_json::Value::as_str),
+            Some("calculated")
         );
     }
 

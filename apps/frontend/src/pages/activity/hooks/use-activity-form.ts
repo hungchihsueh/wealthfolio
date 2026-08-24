@@ -30,6 +30,38 @@ function extractErrorMessage(error: unknown): string {
   return "Failed to save activity. Please check your inputs and try again.";
 }
 
+function withCashAmountProvenance<T extends Record<string, unknown>>(payload: T): T {
+  const requestedMode = payload.amountMode;
+  const amountMode =
+    requestedMode === "calculated" || requestedMode === "custom"
+      ? requestedMode
+      : payload.amount == null
+        ? "calculated"
+        : "custom";
+  const metadata =
+    payload.metadata && typeof payload.metadata === "object"
+      ? (payload.metadata as Record<string, unknown>)
+      : {};
+  const cashAmountMetadata: Record<string, unknown> = {
+    ...((metadata.cash_amount as Record<string, unknown> | undefined) ?? {}),
+    mode: amountMode,
+  };
+  if (payload.amountConfirmed === true) {
+    cashAmountMetadata.confirmed = true;
+  } else {
+    delete cashAmountMetadata.confirmed;
+  }
+
+  return {
+    ...payload,
+    amountMode,
+    metadata: {
+      ...metadata,
+      cash_amount: cashAmountMetadata,
+    },
+  };
+}
+
 function transferPairIds(activity: Partial<ActivityDetails> | undefined): {
   transferOutId?: string;
   transferInId?: string;
@@ -177,7 +209,9 @@ export function useActivityForm({
               return;
             }
 
-            const formPayload = config.toPayload(formData);
+            const formPayload = withCashAmountProvenance(
+              config.toPayload(formData) as Record<string, unknown>,
+            );
 
             // Extract symbol-related and fxRate fields from payload
             const {
@@ -287,7 +321,9 @@ export function useActivityForm({
           // External transfer: determine activity type from direction
           const activityType =
             transferData.direction === "in" ? ActivityType.TRANSFER_IN : ActivityType.TRANSFER_OUT;
-          const basePayload = config.toPayload(formData);
+          const basePayload = withCashAmountProvenance(
+            config.toPayload(formData) as Record<string, unknown>,
+          );
           const accountId = transferData.accountId;
           const account = accounts.find((a) => a.value === accountId);
 
@@ -329,7 +365,9 @@ export function useActivityForm({
         }
 
         // Standard activity handling
-        const basePayload = config.toPayload(formData);
+        const basePayload = withCashAmountProvenance(
+          config.toPayload(formData) as Record<string, unknown>,
+        );
 
         // Get account currency for pure cash activities
         const accountId = (formData as { accountId?: string }).accountId;

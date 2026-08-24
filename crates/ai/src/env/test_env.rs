@@ -651,8 +651,10 @@ impl ActivityServiceTrait for MockActivityService {
         })
     }
 
-    async fn migrate_activity_cash_amounts(&self) -> CoreResult<usize> {
-        Ok(0)
+    async fn migrate_activity_cash_amounts(
+        &self,
+    ) -> CoreResult<wealthfolio_core::activities::ActivityCashMigrationResult> {
+        Ok(Default::default())
     }
 }
 

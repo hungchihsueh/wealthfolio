@@ -457,8 +457,10 @@ export function normalizeDecimalString(value: unknown): string | null {
     return normalized;
   }
   const trimmed = normalized.endsWith(".") ? normalized.slice(0, -1) : normalized;
-  if (trimmed.includes(".")) {
-    return trimmed.replace(/\.?0+$/, "") || "0";
-  }
-  return trimmed;
+  const withoutTrailingZeros = trimmed.includes(".")
+    ? trimmed.replace(/\.?0+$/, "") || "0"
+    : trimmed;
+  const withoutLeadingZeros = withoutTrailingZeros.replace(/^(-?)0+(?=\d)/, "$1");
+  const withIntegerPart = withoutLeadingZeros.replace(/^(-?)\./, "$10.");
+  return /^-?0(?:\.0*)?$/.test(withIntegerPart) ? "0" : withIntegerPart;
 }

@@ -22,9 +22,7 @@ export function getMobileActivityAmount(activity?: Partial<ActivityDetails>): nu
 
 export function allocateInternalSecurityTransferFee(
   fee: number | null | undefined,
-  editedActivityType?: string,
+  _editedActivityType?: string,
 ): { transferOutFee: number | null | undefined; transferInFee: number | null | undefined } {
-  return editedActivityType === ActivityType.TRANSFER_IN
-    ? { transferOutFee: undefined, transferInFee: fee }
-    : { transferOutFee: fee, transferInFee: undefined };
+  return { transferOutFee: fee, transferInFee: null };
 }

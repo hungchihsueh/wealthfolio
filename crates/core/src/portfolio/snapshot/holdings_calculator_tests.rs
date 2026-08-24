@@ -2208,7 +2208,7 @@ mod tests {
     }
 
     #[test]
-    fn test_credit_card_interest_follows_activity_type_direction() {
+    fn test_credit_card_interest_increases_the_liability() {
         let mock_fx_service = MockFxService::new();
         let target_date_str = "2023-01-06";
         let target_date = NaiveDate::from_str(target_date_str).unwrap();
@@ -2243,9 +2243,9 @@ mod tests {
 
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(-75))
+            Some(&dec!(-125))
         );
-        assert_eq!(next_state.cash_total_account_currency, dec!(-75));
+        assert_eq!(next_state.cash_total_account_currency, dec!(-125));
         assert_eq!(
             next_state.net_contribution,
             previous_snapshot.net_contribution
@@ -4333,9 +4333,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deposit_activity_uses_provided_fx_rate() {
-        // Deposit activity should also use the provided fx_rate for conversion
-
+    fn test_deposit_books_activity_currency_and_uses_fx_for_contribution_conversion() {
         let mut mock_fx_service = MockFxService::new();
         let account_currency = "CAD";
         let activity_currency = "USD";
@@ -4377,14 +4375,16 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        // One FX convention: account amount = activity amount × fx_rate.
-        assert!(!next_state.cash_balances.contains_key(activity_currency));
+        assert_eq!(
+            next_state.cash_balances.get(activity_currency),
+            Some(&dec!(500))
+        );
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(1700))
+            Some(&dec!(1000))
         );
 
-        assert_eq!(next_state.cash_total_account_currency, dec!(1700));
+        assert_eq!(next_state.cash_total_account_currency, dec!(1650));
 
         // Net contribution uses activity's fx_rate for conversion
         let deposit_in_cad = dec!(500) * activity_fx_rate;
@@ -4568,9 +4568,7 @@ mod tests {
     }
 
     #[test]
-    fn test_withdrawal_activity_uses_provided_fx_rate() {
-        // Withdrawal activity should use the provided fx_rate
-
+    fn test_withdrawal_books_activity_currency_even_with_fx_rate() {
         let mut mock_fx_service = MockFxService::new();
         let account_currency = "CAD";
         let activity_currency = "USD";
@@ -4612,19 +4610,20 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        assert!(!next_state.cash_balances.contains_key(activity_currency));
+        assert_eq!(
+            next_state.cash_balances.get(activity_currency),
+            Some(&dec!(-200))
+        );
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(4716))
+            Some(&dec!(5000))
         );
 
-        assert_eq!(next_state.cash_total_account_currency, dec!(4716));
+        assert_eq!(next_state.cash_total_account_currency, dec!(4740));
     }
 
     #[test]
-    fn test_dividend_activity_uses_provided_fx_rate() {
-        // Dividend (income) activity should use the provided fx_rate
-
+    fn test_dividend_books_activity_currency_even_with_fx_rate() {
         let mut mock_fx_service = MockFxService::new();
         let account_currency = "CAD";
         let activity_currency = "USD";
@@ -4664,13 +4663,16 @@ mod tests {
         assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
         let next_state = result.unwrap().snapshot;
 
-        assert!(!next_state.cash_balances.contains_key(activity_currency));
+        assert_eq!(
+            next_state.cash_balances.get(activity_currency),
+            Some(&dec!(50))
+        );
         assert_eq!(
             next_state.cash_balances.get(account_currency),
-            Some(&dec!(1066.50))
+            Some(&dec!(1000))
         );
 
-        assert_eq!(next_state.cash_total_account_currency, dec!(1066.50));
+        assert_eq!(next_state.cash_total_account_currency, dec!(1065));
     }
 
     #[test]

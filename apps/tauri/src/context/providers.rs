@@ -12,7 +12,9 @@ use wealthfolio_connect::{
 };
 use wealthfolio_core::{
     accounts::AccountService,
-    activities::{run_activity_cash_amount_v3_8, ActivityService},
+    activities::{
+        rebuild_activity_cash_amount_v3_8, run_activity_cash_amount_v3_8, ActivityService,
+    },
     addons::AddonService,
     assets::{AlternativeAssetService, AssetClassificationService, AssetService},
     events::DomainEvent,
@@ -426,14 +428,20 @@ pub async fn initialize_context(
         .with_lot_repository(lots_repository.clone()),
     );
 
-    run_activity_cash_amount_v3_8(
-        settings_service.as_ref(),
-        activity_service.as_ref(),
-        account_service.as_ref(),
-        snapshot_service.as_ref(),
-        valuation_service.as_ref(),
-    )
-    .await;
+    let cash_migration =
+        run_activity_cash_amount_v3_8(settings_service.as_ref(), activity_service.as_ref()).await;
+    if !cash_migration.affected_account_ids.is_empty() {
+        let snapshot_service = snapshot_service.clone();
+        let valuation_service = valuation_service.clone();
+        tauri::async_runtime::spawn(async move {
+            rebuild_activity_cash_amount_v3_8(
+                cash_migration.affected_account_ids,
+                snapshot_service.as_ref(),
+                valuation_service.as_ref(),
+            )
+            .await;
+        });
+    }
 
     let performance_service = Arc::new(
         PerformanceService::new_with_timezone(

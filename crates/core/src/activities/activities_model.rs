@@ -362,6 +362,8 @@ pub struct NewActivity {
         deserialize_with = "decimal_input_format::deserialize_option_decimal"
     )]
     pub amount: Option<Decimal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_mode: Option<String>,
     pub status: Option<ActivityStatus>,
     #[serde(alias = "comment")]
     pub notes: Option<String>,
@@ -637,6 +639,8 @@ pub struct ActivityUpdate {
         deserialize_with = "decimal_input_format::deserialize_patch_decimal"
     )]
     pub amount: Option<Option<Decimal>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_mode: Option<String>,
     pub status: Option<ActivityStatus>,
     #[serde(alias = "comment")]
     pub notes: Option<String>,
@@ -756,10 +760,15 @@ pub struct ActivityBulkMutationResult {
 #[derive(Debug, Clone)]
 pub struct ActivityAmountUpdate {
     pub id: String,
-    pub amount: Decimal,
-    /// Recomputed only for Wealthfolio-generated semantic hashes. `None` keeps
-    /// provider/manual idempotency keys untouched.
-    pub idempotency_key: Option<String>,
+    pub amount: Option<Decimal>,
+    pub metadata: Option<Value>,
+    pub needs_review: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivityCashMigrationResult {
+    pub changed: usize,
+    pub affected_account_ids: Vec<String>,
 }
 
 /// Pair-aware request for creating or updating an internal cash transfer.
@@ -860,6 +869,9 @@ pub struct ActivityDetails {
     pub fee: Option<String>,
     pub tax: Option<String>,
     pub amount: Option<String>,
+    /// Provenance for the persisted final cash magnitude. Historical rows
+    /// without an explicit marker are exposed as custom.
+    pub amount_mode: String,
     pub needs_review: bool,
     pub comment: Option<String>,
     pub fx_rate: Option<String>,
@@ -1888,6 +1900,12 @@ pub struct PrepareActivitiesResult {
 
 impl From<ActivityImport> for NewActivity {
     fn from(import: ActivityImport) -> Self {
+        let needs_review = import.is_draft;
+        let amount_mode = if import.amount.is_none_or(|amount| amount.is_zero()) {
+            "calculated"
+        } else {
+            "custom"
+        };
         let asset = if import.symbol.is_empty() {
             import
                 .asset_id
@@ -1919,7 +1937,7 @@ impl From<ActivityImport> for NewActivity {
             })
         };
 
-        let status = if import.is_draft {
+        let status = if needs_review {
             Some(ActivityStatus::Draft)
         } else {
             Some(ActivityStatus::Posted)
@@ -1929,15 +1947,27 @@ impl From<ActivityImport> for NewActivity {
         // have the same net-contribution and flow-classification semantics.
         let is_transfer = import.activity_type == ACTIVITY_TYPE_TRANSFER_IN
             || import.activity_type == ACTIVITY_TYPE_TRANSFER_OUT;
-        let metadata = match (import.activity_type.as_str(), import.is_external) {
+        let mut metadata = serde_json::Map::new();
+        match (import.activity_type.as_str(), import.is_external) {
             (ACTIVITY_TYPE_CREDIT, Some(is_external)) => {
-                Some(serde_json::json!({ "flow": { "is_external": is_external } }).to_string())
+                metadata.insert(
+                    "flow".to_string(),
+                    serde_json::json!({ "is_external": is_external }),
+                );
             }
             (_, Some(true)) if is_transfer => {
-                Some(serde_json::json!({ "flow": { "is_external": true } }).to_string())
+                metadata.insert(
+                    "flow".to_string(),
+                    serde_json::json!({ "is_external": true }),
+                );
             }
-            _ => None,
-        };
+            _ => {}
+        }
+        metadata.insert(
+            "cash_amount".to_string(),
+            serde_json::json!({ "mode": amount_mode }),
+        );
+        let metadata = serde_json::to_string(&serde_json::Value::Object(metadata)).ok();
 
         NewActivity {
             id: import.id,
@@ -1953,11 +1983,12 @@ impl From<ActivityImport> for NewActivity {
             fee: import.fee,
             tax: import.tax,
             amount: import.amount,
+            amount_mode: Some(amount_mode.to_string()),
             status,
             notes: import.comment,
             fx_rate: import.fx_rate,
             metadata,
-            needs_review: None,
+            needs_review: Some(needs_review),
             source_system: Some("CSV".to_string()),
             source_record_id: None,
             source_group_id: None,

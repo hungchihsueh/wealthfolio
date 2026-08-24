@@ -1,7 +1,7 @@
 import { DECIMAL_PRECISION } from "@/lib/constants";
 import { roundDecimal } from "@/lib/utils";
 import { useAmountFormatting } from "@wealthfolio/ui";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useFormContext, useFormState } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { AmountInput } from "./amount-input";
@@ -10,6 +10,7 @@ interface TradeTotalInputProps {
   side: "buy" | "sell" | "income";
   calculatedAmount: number;
   initialAmount?: number | null;
+  initialAmountMode?: "calculated" | "custom";
   currency?: string;
   variant?: "desktop" | "mobile";
   label?: string;
@@ -19,6 +20,8 @@ interface TradeTotalInputProps {
 
 interface TradeTotalFormValues {
   amount?: number | null;
+  amountMode?: "calculated" | "custom";
+  amountConfirmed?: boolean;
 }
 
 /**
@@ -29,6 +32,7 @@ export function TradeTotalInput({
   side,
   calculatedAmount,
   initialAmount,
+  initialAmountMode,
   currency,
   variant = "desktop",
   label: labelOverride,
@@ -37,20 +41,19 @@ export function TradeTotalInput({
 }: TradeTotalInputProps) {
   const { t } = useTranslation(["activity"]);
   const formatting = useAmountFormatting();
-  const { control, getFieldState, resetField, watch } = useFormContext<TradeTotalFormValues>();
+  const { control, getFieldState, resetField, setValue, watch } =
+    useFormContext<TradeTotalFormValues>();
   const formState = useFormState({ control, name: "amount" });
   const amount = watch("amount");
   const hasInitialAmount = Number(initialAmount) > 0;
-  const [preserveInitialAmount, setPreserveInitialAmount] = useState(hasInitialAmount);
-  const [isClearingAmount, setIsClearingAmount] = useState(false);
-
-  useEffect(() => {
-    setPreserveInitialAmount(hasInitialAmount);
-  }, [hasInitialAmount, initialAmount]);
+  const initialIsCustom = hasInitialAmount && initialAmountMode !== "calculated";
+  const [preserveInitialAmount, setPreserveInitialAmount] = useState(initialIsCustom);
+  const hasInitializedAmount = useRef(false);
+  const previousCalculatedAmount = useRef(calculatedAmount);
 
   const normalizedCalculatedAmount = useMemo(() => {
-    if (!(calculatedAmount > 0)) return undefined;
-    return roundDecimal(calculatedAmount, DECIMAL_PRECISION);
+    if (!Number.isFinite(calculatedAmount) || calculatedAmount === 0) return undefined;
+    return roundDecimal(Math.abs(calculatedAmount), DECIMAL_PRECISION);
   }, [calculatedAmount]);
 
   const hasEnteredAmount = Number(amount) > 0;
@@ -58,12 +61,28 @@ export function TradeTotalInput({
     hasEnteredAmount && (preserveInitialAmount || getFieldState("amount", formState).isDirty);
 
   useEffect(() => {
-    if (isCustom || (isClearingAmount && !hasEnteredAmount)) return;
+    setPreserveInitialAmount(initialIsCustom);
+    setValue("amountMode", initialIsCustom ? "custom" : "calculated");
+    setValue("amountConfirmed", false);
+    if (!hasInitializedAmount.current && !initialIsCustom) {
+      resetField("amount", { defaultValue: normalizedCalculatedAmount });
+    }
+    hasInitializedAmount.current = true;
+  }, [initialAmount, initialIsCustom, normalizedCalculatedAmount, resetField, setValue]);
+
+  useEffect(() => {
+    if (previousCalculatedAmount.current === calculatedAmount) return;
+    previousCalculatedAmount.current = calculatedAmount;
+    setPreserveInitialAmount(false);
+    setValue("amountMode", "calculated");
+    setValue("amountConfirmed", false);
     resetField("amount", { defaultValue: normalizedCalculatedAmount });
-  }, [hasEnteredAmount, isClearingAmount, isCustom, normalizedCalculatedAmount, resetField]);
+  }, [calculatedAmount, normalizedCalculatedAmount, resetField, setValue]);
 
   const useCalculatedTotal = () => {
     setPreserveInitialAmount(false);
+    setValue("amountMode", "calculated");
+    setValue("amountConfirmed", false);
     resetField("amount", { defaultValue: normalizedCalculatedAmount });
   };
 
@@ -91,10 +110,18 @@ export function TradeTotalInput({
         onValueChange={(value) => {
           if (value == null) {
             setPreserveInitialAmount(false);
-            setIsClearingAmount(true);
+            setValue("amountMode", "calculated");
+            setValue("amountConfirmed", false);
+          } else {
+            setValue("amountMode", "custom");
+            setValue("amountConfirmed", true);
           }
         }}
-        onBlur={() => setIsClearingAmount(false)}
+        onBlur={() => {
+          if (!hasEnteredAmount) {
+            resetField("amount", { defaultValue: normalizedCalculatedAmount });
+          }
+        }}
       />
       <div className="text-muted-foreground flex min-h-5 flex-wrap items-center gap-x-2 text-xs">
         <span>
@@ -120,7 +147,7 @@ export function TradeTotalInput({
       </div>
       {side !== "income" && displayedAmount && displayedAmount > 0 ? (
         <p className="text-muted-foreground text-xs">
-          {t("activity:form.cash_effect")}: {side === "buy" ? "−" : "+"}
+          {t("activity:form.cash_effect")}: {side === "buy" || calculatedAmount < 0 ? "−" : "+"}
           {formatting.formatAmount(displayedAmount, currency ?? "", Boolean(currency))}
         </p>
       ) : null}

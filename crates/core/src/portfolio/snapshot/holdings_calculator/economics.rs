@@ -104,9 +104,19 @@ pub(crate) fn signed_cash_effect(activity: &Activity, asset_info: &AssetPosition
         .signed_cash_effect
 }
 
-/// Applies the one supported broker-FX convention: account amount equals
-/// activity amount multiplied by `fx_rate`.
+/// Books non-trade cash in the activity's declared cash currency. `fx_rate`
+/// remains valuation/transfer context and does not select a cash bucket.
 pub(crate) fn cash_booking(
+    activity: &Activity,
+    _account_currency: &str,
+    signed_effect: Decimal,
+) -> (String, Decimal) {
+    (activity.currency.clone(), signed_effect)
+}
+
+/// Applies the supported broker trade-FX convention: a trade explicitly
+/// carrying an FX rate settles in account currency.
+pub(crate) fn trade_cash_booking(
     activity: &Activity,
     account_currency: &str,
     signed_effect: Decimal,
@@ -117,7 +127,7 @@ pub(crate) fn cash_booking(
         }
     }
 
-    (activity.currency.clone(), signed_effect)
+    cash_booking(activity, account_currency, signed_effect)
 }
 
 pub(crate) fn proportional_amount(

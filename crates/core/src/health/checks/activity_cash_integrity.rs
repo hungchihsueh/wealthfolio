@@ -16,6 +16,7 @@ use crate::health::traits::{HealthCheck, HealthContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActivityCashIssueKind {
+    NeedsReview,
     Mismatch,
     Missing,
 }
@@ -50,6 +51,7 @@ impl ActivityCashIntegrityCheck {
         _ctx: &HealthContext,
     ) -> Vec<HealthIssue> {
         [
+            ActivityCashIssueKind::NeedsReview,
             ActivityCashIssueKind::Mismatch,
             ActivityCashIssueKind::Missing,
         ]
@@ -93,6 +95,12 @@ fn issue_for_findings(
     findings: &[&ActivityCashIssueInfo],
 ) -> HealthIssue {
     let (code, severity, title, message) = match kind {
+        ActivityCashIssueKind::NeedsReview => (
+            "activity_cash_needs_review",
+            Severity::Warning,
+            "Activity cash amounts need review",
+            "Wealthfolio preserved these cash amounts because their historical meaning could not be classified safely.",
+        ),
         ActivityCashIssueKind::Mismatch => (
             "activity_cash_mismatch",
             Severity::Warning,
@@ -195,6 +203,17 @@ fn decimal_text(value: Option<Decimal>) -> String {
 
 fn format_details(finding: &ActivityCashIssueInfo) -> String {
     match finding.kind {
+        ActivityCashIssueKind::NeedsReview => format!(
+            "Stored cash amount: {} {}\nExpected from available activity details: {} {}\nQuantity: {}\nUnit price: {}\nFee: {}\nTax: {}\n\nConfirm the final cash total in the activity editor. Until then, Wealthfolio preserves the prior economic behavior.",
+            decimal_text(finding.trusted_amount),
+            finding.currency,
+            decimal_text(finding.expected_amount),
+            finding.currency,
+            decimal_text(finding.quantity),
+            decimal_text(finding.unit_price),
+            finding.fee,
+            finding.tax,
+        ),
         ActivityCashIssueKind::Mismatch => format!(
             "Trusted cash amount: {} {}\nExpected from quantity × price and charges: {} {}\nDifference: {} {}\nQuantity: {}\nUnit price: {}\nFee: {}\nTax: {}\n\nWealthfolio used the trusted cash amount.",
             decimal_text(finding.trusted_amount),
@@ -220,6 +239,9 @@ fn format_details(finding: &ActivityCashIssueInfo) -> String {
 
 fn format_group_details(kind: ActivityCashIssueKind, count: usize) -> String {
     let description = match kind {
+        ActivityCashIssueKind::NeedsReview => {
+            "have historical cash amounts that could not be classified safely"
+        }
         ActivityCashIssueKind::Mismatch => {
             "have trusted totals that differ from their quantity, price, fees, or taxes"
         }

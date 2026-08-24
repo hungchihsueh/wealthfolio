@@ -18,7 +18,8 @@ use wealthfolio_core::addons::{AddonService, AddonServiceTrait};
 use wealthfolio_core::{
     accounts::{AccountService, AccountServiceTrait},
     activities::{
-        run_activity_cash_amount_v3_8, ActivityService as CoreActivityService, ActivityServiceTrait,
+        rebuild_activity_cash_amount_v3_8, run_activity_cash_amount_v3_8,
+        ActivityService as CoreActivityService, ActivityServiceTrait,
     },
     assets::{
         AlternativeAssetRepositoryTrait, AlternativeAssetService, AlternativeAssetServiceTrait,
@@ -560,14 +561,20 @@ pub async fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         .with_timezone(timezone.clone())
         .with_event_sink(domain_event_sink.clone()),
     );
-    run_activity_cash_amount_v3_8(
-        settings_service.as_ref(),
-        activity_service.as_ref(),
-        account_service.as_ref(),
-        snapshot_service.as_ref(),
-        valuation_service.as_ref(),
-    )
-    .await;
+    let cash_migration =
+        run_activity_cash_amount_v3_8(settings_service.as_ref(), activity_service.as_ref()).await;
+    if !cash_migration.affected_account_ids.is_empty() {
+        let snapshot_service = snapshot_service.clone();
+        let valuation_service = valuation_service.clone();
+        tokio::spawn(async move {
+            rebuild_activity_cash_amount_v3_8(
+                cash_migration.affected_account_ids,
+                snapshot_service.as_ref(),
+                valuation_service.as_ref(),
+            )
+            .await;
+        });
+    }
 
     // Spending: events + event_types
     let event_types_repo: Arc<dyn wealthfolio_spending::events::EventTypesRepositoryTrait> =

@@ -128,9 +128,41 @@ impl EconomicEventEffect {
 
 pub struct ActivityEconomicsResolver;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LegacyActivityCashClassification {
+    Derived,
+    Equivalent,
+    Final,
+    Gross,
+    Ambiguous,
+    Missing,
+    NotApplicable,
+}
+
+impl LegacyActivityCashClassification {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Derived => "derived",
+            Self::Equivalent => "equivalent",
+            Self::Final => "final",
+            Self::Gross => "gross_converted",
+            Self::Ambiguous => "ambiguous",
+            Self::Missing => "missing",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClassifiedLegacyActivityCash {
+    pub classification: LegacyActivityCashClassification,
+    pub final_amount: Option<Decimal>,
+    pub needs_review: bool,
+}
+
 /// Flat inputs used to resolve the cash economics of persisted, imported, and
-/// not-yet-persisted activities. Monetary values are magnitudes; the activity
-/// type is the sole source of direction.
+/// not-yet-persisted activities. Monetary values are magnitudes; activity type
+/// supplies normal direction while gross economics resolve exceptional cases.
 #[derive(Clone, Copy, Debug)]
 pub struct ActivityCashInputs<'a> {
     pub activity_type: &'a str,
@@ -185,7 +217,7 @@ impl ActivityEconomicsResolver {
     }
 
     pub fn resolve_cash(activity: &Activity, unit_multiplier: Decimal) -> ResolvedActivityCash {
-        Self::resolve_cash_inputs(ActivityCashInputs {
+        let inputs = ActivityCashInputs {
             activity_type: activity.effective_type(),
             is_security_transfer: Self::is_security_transfer(activity),
             quantity: activity.quantity,
@@ -194,7 +226,38 @@ impl ActivityEconomicsResolver {
             fee: activity.fee,
             tax: activity.tax,
             unit_multiplier,
-        })
+        };
+
+        Self::resolve_cash_inputs_with_legacy_compatibility(
+            inputs,
+            Self::uses_legacy_gross_compatibility(activity),
+        )
+    }
+
+    /// Resolves the one direction exception that depends on account context.
+    /// Investment-account interest is income; credit-card interest increases
+    /// the liability and is therefore an outflow.
+    pub fn resolve_cash_with_account_context(
+        activity: &Activity,
+        unit_multiplier: Decimal,
+        is_credit_card_account: bool,
+    ) -> ResolvedActivityCash {
+        let mut resolved = Self::resolve_cash(activity, unit_multiplier);
+        if is_credit_card_account && activity.effective_type() == ACTIVITY_TYPE_INTEREST {
+            resolved.signed_cash_effect = -resolved.amount.unwrap_or(Decimal::ZERO).abs();
+        }
+        resolved
+    }
+
+    pub fn resolve_cash_inputs_with_legacy_compatibility(
+        inputs: ActivityCashInputs<'_>,
+        legacy_gross_compatibility: bool,
+    ) -> ResolvedActivityCash {
+        if legacy_gross_compatibility {
+            Self::resolve_legacy_gross_cash_inputs(inputs)
+        } else {
+            Self::resolve_cash_inputs(inputs)
+        }
     }
 
     pub fn resolve_cash_inputs(inputs: ActivityCashInputs<'_>) -> ResolvedActivityCash {
@@ -214,10 +277,11 @@ impl ActivityEconomicsResolver {
 
         let tax = inputs.tax.unwrap_or(Decimal::ZERO).abs();
         let charges = fee + tax;
-        let expected_amount = Self::derived_cash_amount(inputs, fee, tax);
+        let expected_cash_effect = Self::derived_cash_effect(inputs, fee, tax);
+        let expected_amount = expected_cash_effect.map(|amount| amount.abs());
         let supplied_amount = inputs.amount.map(|amount| amount.abs());
         let amount = match supplied_amount {
-            Some(amount) if amount.is_zero() => expected_amount.or(Some(amount)),
+            Some(amount) if amount.is_zero() => expected_amount.or(Some(Decimal::ZERO)),
             Some(amount) => Some(amount),
             None => expected_amount,
         };
@@ -225,36 +289,37 @@ impl ActivityEconomicsResolver {
             expected_amount.is_some() && supplied_amount.is_none_or(|amount| amount.is_zero());
 
         let signed_cash_effect = amount
-            .map(|amount| match inputs.activity_type {
-                ACTIVITY_TYPE_SELL
-                | ACTIVITY_TYPE_DEPOSIT
-                | ACTIVITY_TYPE_DIVIDEND
-                | ACTIVITY_TYPE_INTEREST
-                | ACTIVITY_TYPE_CREDIT
-                | ACTIVITY_TYPE_TRANSFER_IN => amount,
-                ACTIVITY_TYPE_BUY
-                | ACTIVITY_TYPE_WITHDRAWAL
-                | ACTIVITY_TYPE_FEE
-                | ACTIVITY_TYPE_TAX
-                | ACTIVITY_TYPE_TRANSFER_OUT => -amount,
-                _ => Decimal::ZERO,
+            .map(|amount| {
+                let default_effect = Self::type_directed_cash_effect(inputs.activity_type, amount);
+                expected_cash_effect
+                    .filter(|expected| !expected.is_zero())
+                    .map(|expected| {
+                        if expected.is_sign_negative() {
+                            -amount
+                        } else {
+                            amount
+                        }
+                    })
+                    .unwrap_or(default_effect)
             })
             .unwrap_or(Decimal::ZERO);
 
         let gross_amount = amount.and_then(|amount| {
             let gross = match inputs.activity_type {
-                ACTIVITY_TYPE_BUY => amount - charges,
+                ACTIVITY_TYPE_BUY => -signed_cash_effect - charges,
                 ACTIVITY_TYPE_SELL
                 | ACTIVITY_TYPE_DEPOSIT
                 | ACTIVITY_TYPE_DIVIDEND
                 | ACTIVITY_TYPE_INTEREST
                 | ACTIVITY_TYPE_CREDIT
-                | ACTIVITY_TYPE_TRANSFER_IN => amount + charges,
-                ACTIVITY_TYPE_WITHDRAWAL | ACTIVITY_TYPE_TRANSFER_OUT => amount - charges,
+                | ACTIVITY_TYPE_TRANSFER_IN => signed_cash_effect + charges,
+                ACTIVITY_TYPE_WITHDRAWAL | ACTIVITY_TYPE_TRANSFER_OUT => {
+                    -signed_cash_effect - charges
+                }
                 ACTIVITY_TYPE_FEE | ACTIVITY_TYPE_TAX => amount,
                 _ => return None,
             };
-            (gross > Decimal::ZERO).then_some(gross)
+            (gross >= Decimal::ZERO).then_some(gross)
         });
 
         ResolvedActivityCash {
@@ -263,6 +328,107 @@ impl ActivityEconomicsResolver {
             signed_cash_effect,
             gross_amount,
             amount_was_derived,
+        }
+    }
+
+    pub fn classify_legacy_cash_inputs(
+        inputs: ActivityCashInputs<'_>,
+        tolerance: Decimal,
+    ) -> ClassifiedLegacyActivityCash {
+        if inputs.activity_type == ACTIVITY_TYPE_SPLIT || inputs.is_security_transfer {
+            return ClassifiedLegacyActivityCash {
+                classification: LegacyActivityCashClassification::NotApplicable,
+                final_amount: inputs.amount.map(|amount| amount.abs()),
+                needs_review: false,
+            };
+        }
+
+        let tolerance = tolerance.abs();
+        let fee = inputs.fee.unwrap_or(Decimal::ZERO).abs();
+        let tax = inputs.tax.unwrap_or(Decimal::ZERO).abs();
+        let charges = fee + tax;
+        let supplied = inputs.amount.map(|amount| amount.abs());
+        let expected_effect = Self::derived_cash_effect(inputs, fee, tax);
+        let expected_final = expected_effect.map(|amount| amount.abs());
+
+        if supplied.is_none_or(|amount| amount.is_zero()) {
+            return match expected_final {
+                Some(final_amount) => ClassifiedLegacyActivityCash {
+                    classification: LegacyActivityCashClassification::Derived,
+                    final_amount: Some(final_amount),
+                    needs_review: false,
+                },
+                None => ClassifiedLegacyActivityCash {
+                    classification: LegacyActivityCashClassification::Missing,
+                    final_amount: None,
+                    needs_review: true,
+                },
+            };
+        }
+
+        let supplied = supplied.unwrap_or_default();
+        if charges.is_zero() {
+            return ClassifiedLegacyActivityCash {
+                classification: LegacyActivityCashClassification::Equivalent,
+                final_amount: Some(supplied),
+                needs_review: false,
+            };
+        }
+
+        if matches!(inputs.activity_type, ACTIVITY_TYPE_FEE | ACTIVITY_TYPE_TAX) {
+            return ClassifiedLegacyActivityCash {
+                classification: LegacyActivityCashClassification::Final,
+                final_amount: Some(supplied),
+                needs_review: false,
+            };
+        }
+
+        let Some(expected_gross) = Self::derived_gross(inputs) else {
+            return ClassifiedLegacyActivityCash {
+                classification: LegacyActivityCashClassification::Ambiguous,
+                final_amount: Some(supplied),
+                needs_review: true,
+            };
+        };
+        let Some(expected_final) = expected_final else {
+            return ClassifiedLegacyActivityCash {
+                classification: LegacyActivityCashClassification::Ambiguous,
+                final_amount: Some(supplied),
+                needs_review: true,
+            };
+        };
+
+        let matches_gross = (supplied - expected_gross).abs() <= tolerance;
+        let matches_final = (supplied - expected_final).abs() <= tolerance;
+        let candidates_equivalent = (expected_gross - expected_final).abs() <= tolerance;
+
+        match (matches_gross, matches_final, candidates_equivalent) {
+            (true, true, true) => ClassifiedLegacyActivityCash {
+                classification: LegacyActivityCashClassification::Equivalent,
+                final_amount: Some(supplied),
+                needs_review: false,
+            },
+            (false, true, _) => ClassifiedLegacyActivityCash {
+                classification: LegacyActivityCashClassification::Final,
+                final_amount: Some(supplied),
+                needs_review: false,
+            },
+            (true, false, _) => ClassifiedLegacyActivityCash {
+                classification: LegacyActivityCashClassification::Gross,
+                final_amount: Self::cash_effect_from_gross(
+                    inputs.activity_type,
+                    supplied,
+                    fee,
+                    tax,
+                )
+                .map(|amount| amount.abs()),
+                needs_review: false,
+            },
+            _ => ClassifiedLegacyActivityCash {
+                classification: LegacyActivityCashClassification::Ambiguous,
+                final_amount: Some(supplied),
+                needs_review: true,
+            },
         }
     }
 
@@ -279,8 +445,9 @@ impl ActivityEconomicsResolver {
             return Some(supplied);
         }
 
-        let charges =
-            inputs.fee.unwrap_or(Decimal::ZERO).abs() + inputs.tax.unwrap_or(Decimal::ZERO).abs();
+        let fee = inputs.fee.unwrap_or(Decimal::ZERO).abs();
+        let tax = inputs.tax.unwrap_or(Decimal::ZERO).abs();
+        let charges = fee + tax;
         let gross = match (inputs.quantity, inputs.unit_price) {
             (Some(quantity), Some(unit_price)) => {
                 quantity.abs()
@@ -289,10 +456,11 @@ impl ActivityEconomicsResolver {
             }
             _ => return Some(supplied),
         };
-        let expected_final = match inputs.activity_type {
-            ACTIVITY_TYPE_BUY => gross + charges,
-            ACTIVITY_TYPE_SELL if gross > charges => gross - charges,
-            _ => return Some(supplied),
+        let Some(expected_final) =
+            Self::cash_effect_from_gross(inputs.activity_type, gross, fee, tax)
+                .map(|amount| amount.abs())
+        else {
+            return Some(supplied);
         };
 
         let tolerance = tolerance.abs();
@@ -301,7 +469,7 @@ impl ActivityEconomicsResolver {
         if matches_gross && !matches_final {
             match inputs.activity_type {
                 ACTIVITY_TYPE_BUY => Some(supplied + charges),
-                ACTIVITY_TYPE_SELL if supplied > charges => Some(supplied - charges),
+                ACTIVITY_TYPE_SELL => Some((supplied - charges).abs()),
                 _ => Some(supplied),
             }
         } else {
@@ -309,42 +477,118 @@ impl ActivityEconomicsResolver {
         }
     }
 
-    fn derived_cash_amount(
+    fn derived_cash_effect(
         inputs: ActivityCashInputs<'_>,
         fee: Decimal,
         tax: Decimal,
     ) -> Option<Decimal> {
-        let charges = fee + tax;
+        match inputs.activity_type {
+            ACTIVITY_TYPE_BUY
+            | ACTIVITY_TYPE_SELL
+            | ACTIVITY_TYPE_DEPOSIT
+            | ACTIVITY_TYPE_DIVIDEND
+            | ACTIVITY_TYPE_INTEREST
+            | ACTIVITY_TYPE_CREDIT
+            | ACTIVITY_TYPE_TRANSFER_IN
+            | ACTIVITY_TYPE_WITHDRAWAL
+            | ACTIVITY_TYPE_TRANSFER_OUT => Self::derived_gross(inputs).and_then(|gross| {
+                Self::cash_effect_from_gross(inputs.activity_type, gross, fee, tax)
+            }),
+            ACTIVITY_TYPE_FEE => (fee > Decimal::ZERO).then_some(-fee),
+            // Historical standalone TAX rows sometimes stored the charge in
+            // `fee`. Keep that legacy fallback aligned with Activity::charge_amt_for.
+            ACTIVITY_TYPE_TAX => (tax > Decimal::ZERO)
+                .then_some(-tax)
+                .or_else(|| (fee > Decimal::ZERO).then_some(-fee)),
+            _ => None,
+        }
+    }
+
+    fn derived_gross(inputs: ActivityCashInputs<'_>) -> Option<Decimal> {
         let multiplier = Self::valid_unit_multiplier(inputs.unit_multiplier);
-        let derived_gross = match (inputs.quantity, inputs.unit_price) {
+        match (inputs.quantity, inputs.unit_price) {
             (Some(quantity), Some(unit_price)) => {
-                let gross = quantity.abs() * unit_price.abs() * multiplier;
-                (gross > Decimal::ZERO).then_some(gross)
+                Some(quantity.abs() * unit_price.abs() * multiplier)
             }
             _ => None,
-        };
+        }
+    }
 
-        let derived = match inputs.activity_type {
-            ACTIVITY_TYPE_BUY => derived_gross.map(|gross| gross + charges),
+    fn cash_effect_from_gross(
+        activity_type: &str,
+        gross: Decimal,
+        fee: Decimal,
+        tax: Decimal,
+    ) -> Option<Decimal> {
+        let charges = fee.abs() + tax.abs();
+        match activity_type {
+            ACTIVITY_TYPE_BUY | ACTIVITY_TYPE_WITHDRAWAL | ACTIVITY_TYPE_TRANSFER_OUT => {
+                Some(-(gross.abs() + charges))
+            }
             ACTIVITY_TYPE_SELL
             | ACTIVITY_TYPE_DEPOSIT
             | ACTIVITY_TYPE_DIVIDEND
             | ACTIVITY_TYPE_INTEREST
             | ACTIVITY_TYPE_CREDIT
-            | ACTIVITY_TYPE_TRANSFER_IN => derived_gross.map(|gross| gross - charges),
-            ACTIVITY_TYPE_WITHDRAWAL | ACTIVITY_TYPE_TRANSFER_OUT => {
-                derived_gross.map(|gross| gross + charges)
-            }
-            ACTIVITY_TYPE_FEE => (fee > Decimal::ZERO).then_some(fee),
-            // Historical standalone TAX rows sometimes stored the charge in
-            // `fee`. Keep that legacy fallback aligned with Activity::charge_amt_for.
-            ACTIVITY_TYPE_TAX => (tax > Decimal::ZERO)
-                .then_some(tax)
-                .or_else(|| (fee > Decimal::ZERO).then_some(fee)),
+            | ACTIVITY_TYPE_TRANSFER_IN => Some(gross.abs() - charges),
+            ACTIVITY_TYPE_FEE => Some(-fee.abs()),
+            ACTIVITY_TYPE_TAX => Some(-tax.abs()),
             _ => None,
-        }?;
+        }
+    }
 
-        (derived > Decimal::ZERO).then_some(derived)
+    fn type_directed_cash_effect(activity_type: &str, amount: Decimal) -> Decimal {
+        match activity_type {
+            ACTIVITY_TYPE_SELL
+            | ACTIVITY_TYPE_DEPOSIT
+            | ACTIVITY_TYPE_DIVIDEND
+            | ACTIVITY_TYPE_INTEREST
+            | ACTIVITY_TYPE_CREDIT
+            | ACTIVITY_TYPE_TRANSFER_IN => amount.abs(),
+            ACTIVITY_TYPE_BUY
+            | ACTIVITY_TYPE_WITHDRAWAL
+            | ACTIVITY_TYPE_FEE
+            | ACTIVITY_TYPE_TAX
+            | ACTIVITY_TYPE_TRANSFER_OUT => -amount.abs(),
+            _ => Decimal::ZERO,
+        }
+    }
+
+    fn uses_legacy_gross_compatibility(activity: &Activity) -> bool {
+        activity.needs_review
+            && activity
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("migrations"))
+                .and_then(|migrations| migrations.get("cash_amount_v3_8"))
+                .and_then(|migration| migration.get("classification"))
+                .and_then(serde_json::Value::as_str)
+                == Some(LegacyActivityCashClassification::Ambiguous.as_str())
+    }
+
+    fn resolve_legacy_gross_cash_inputs(inputs: ActivityCashInputs<'_>) -> ResolvedActivityCash {
+        let Some(gross) = inputs
+            .amount
+            .map(|amount| amount.abs())
+            .filter(|amount| !amount.is_zero())
+        else {
+            return Self::resolve_cash_inputs(inputs);
+        };
+        let fee = inputs.fee.unwrap_or(Decimal::ZERO).abs();
+        let tax = inputs.tax.unwrap_or(Decimal::ZERO).abs();
+        let signed_cash_effect =
+            Self::cash_effect_from_gross(inputs.activity_type, gross, fee, tax)
+                .unwrap_or(Decimal::ZERO);
+        let expected_amount =
+            Self::derived_cash_effect(inputs, fee, tax).map(|amount| amount.abs());
+
+        ResolvedActivityCash {
+            amount: Some(signed_cash_effect.abs()),
+            expected_amount,
+            signed_cash_effect,
+            gross_amount: Some(gross),
+            amount_was_derived: false,
+        }
     }
 
     pub fn compile_activity(
@@ -917,5 +1161,64 @@ mod cash_tests {
         assert_eq!(resolved.expected_amount, Some(dec!(0.5898108)));
         assert_eq!(resolved.gross_amount, Some(dec!(0.30)));
         assert!(!resolved.amount_was_derived);
+    }
+
+    #[test]
+    fn sell_charges_exceeding_proceeds_keep_a_magnitude_but_reverse_cash_direction() {
+        let mut sell = inputs(ACTIVITY_TYPE_SELL);
+        sell.quantity = Some(dec!(1));
+        sell.unit_price = Some(dec!(1));
+        sell.fee = Some(dec!(2));
+        sell.tax = None;
+
+        let derived = ActivityEconomicsResolver::resolve_cash_inputs(sell);
+        assert_eq!(derived.amount, Some(dec!(1)));
+        assert_eq!(derived.signed_cash_effect, dec!(-1));
+        assert_eq!(derived.gross_amount, Some(dec!(1)));
+
+        sell.amount = Some(dec!(0.75));
+        let custom = ActivityEconomicsResolver::resolve_cash_inputs(sell);
+        assert_eq!(custom.amount, Some(dec!(0.75)));
+        assert_eq!(custom.signed_cash_effect, dec!(-0.75));
+    }
+
+    #[test]
+    fn legacy_cash_classification_distinguishes_final_gross_and_ambiguous_values() {
+        let mut case = inputs(ACTIVITY_TYPE_BUY);
+
+        case.amount = Some(dec!(23));
+        let final_value = ActivityEconomicsResolver::classify_legacy_cash_inputs(case, dec!(0.01));
+        assert_eq!(
+            final_value.classification,
+            LegacyActivityCashClassification::Final
+        );
+        assert_eq!(final_value.final_amount, Some(dec!(23)));
+        assert!(!final_value.needs_review);
+
+        case.amount = Some(dec!(20));
+        let gross = ActivityEconomicsResolver::classify_legacy_cash_inputs(case, dec!(0.01));
+        assert_eq!(
+            gross.classification,
+            LegacyActivityCashClassification::Gross
+        );
+        assert_eq!(gross.final_amount, Some(dec!(23)));
+        assert!(!gross.needs_review);
+
+        case.amount = Some(dec!(40));
+        let ambiguous = ActivityEconomicsResolver::classify_legacy_cash_inputs(case, dec!(0.01));
+        assert_eq!(
+            ambiguous.classification,
+            LegacyActivityCashClassification::Ambiguous
+        );
+        assert_eq!(ambiguous.final_amount, Some(dec!(40)));
+        assert!(ambiguous.needs_review);
+
+        case.amount = None;
+        let derived = ActivityEconomicsResolver::classify_legacy_cash_inputs(case, dec!(0.01));
+        assert_eq!(
+            derived.classification,
+            LegacyActivityCashClassification::Derived
+        );
+        assert_eq!(derived.final_amount, Some(dec!(23)));
     }
 }

@@ -891,6 +891,16 @@ fn classify_activity_cash_issue(
     let checks_expected_cash = matches!(activity_type, ACTIVITY_TYPE_BUY | ACTIVITY_TYPE_SELL)
         || NewActivity::is_asset_backed_income_subtype(activity_type, activity.subtype.as_deref());
 
+    let legitimate_zero =
+        resolved.amount == Some(Decimal::ZERO) && resolved.expected_amount == Some(Decimal::ZERO);
+    if !legitimate_zero && resolved.amount.is_none_or(|amount| amount <= Decimal::ZERO) {
+        return Some(ActivityCashIssueKind::Missing);
+    }
+
+    if activity.needs_review {
+        return Some(ActivityCashIssueKind::NeedsReview);
+    }
+
     if checks_expected_cash
         && trusted_amount
             .zip(resolved.expected_amount)
@@ -901,10 +911,7 @@ fn classify_activity_cash_issue(
         return Some(ActivityCashIssueKind::Mismatch);
     }
 
-    resolved
-        .amount
-        .is_none_or(|amount| amount <= Decimal::ZERO)
-        .then_some(ActivityCashIssueKind::Missing)
+    None
 }
 
 fn effective_timezone<'a>(
@@ -3235,6 +3242,17 @@ mod tests {
         assert_eq!(
             classify_activity_cash_issue(&mismatched, resolved),
             Some(ActivityCashIssueKind::Mismatch)
+        );
+
+        let mut ambiguous_deposit = mismatched.clone();
+        ambiguous_deposit.activity_type = ACTIVITY_TYPE_DEPOSIT.to_string();
+        ambiguous_deposit.asset_id = None;
+        ambiguous_deposit.needs_review = true;
+        let resolved = ActivityEconomicsResolver::resolve_cash(&ambiguous_deposit, Decimal::ONE);
+        assert_eq!(
+            classify_activity_cash_issue(&ambiguous_deposit, resolved),
+            Some(ActivityCashIssueKind::NeedsReview),
+            "posted historical ambiguities must be visible even for non-trade cash types"
         );
 
         let mut unresolved = derivable;

@@ -322,6 +322,28 @@ impl From<ActivityDetailsDB> for wealthfolio_core::activities::ActivityDetails {
         }
         .contract_multiplier()
         .to_string();
+        let metadata = db
+            .metadata
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
+        let amount_mode = metadata
+            .as_ref()
+            .and_then(|value| value.pointer("/cash_amount/mode"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|mode| matches!(*mode, "calculated" | "custom"))
+            .unwrap_or_else(|| {
+                if db
+                    .amount
+                    .as_deref()
+                    .and_then(|amount| Decimal::from_str(amount).ok())
+                    .is_none_or(|amount| amount.is_zero())
+                {
+                    "calculated"
+                } else {
+                    "custom"
+                }
+            })
+            .to_string();
 
         Self {
             id: db.id,
@@ -337,6 +359,7 @@ impl From<ActivityDetailsDB> for wealthfolio_core::activities::ActivityDetails {
             fee: db.fee,
             tax: db.tax,
             amount: db.amount,
+            amount_mode,
             needs_review: db.needs_review != 0,
             comment: db.notes,
             fx_rate: db.fx_rate,
@@ -358,7 +381,7 @@ impl From<ActivityDetailsDB> for wealthfolio_core::activities::ActivityDetails {
             idempotency_key: db.idempotency_key,
             import_run_id: db.import_run_id,
             is_user_modified: db.is_user_modified != 0,
-            metadata: db.metadata.and_then(|s| serde_json::from_str(&s).ok()),
+            metadata,
         }
     }
 }

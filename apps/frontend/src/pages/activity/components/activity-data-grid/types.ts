@@ -6,8 +6,10 @@ import type { ActivityDetails, AssetResolutionInput } from "@/lib/types";
 export interface LocalTransaction extends ActivityDetails {
   /** Indicates if the transaction is newly created and not yet persisted */
   isNew?: boolean;
-  /** UI-only source for trade and asset-backed-income totals; never persisted. */
+  /** Provenance for trade and asset-backed-income totals. */
   amountMode?: "calculated" | "custom";
+  /** True only when the user explicitly edits the final total. */
+  amountConfirmed?: boolean;
   /** Pending asset name from custom asset dialog (not yet persisted) */
   pendingAssetName?: string;
   /** Pending asset kind from custom asset dialog (e.g., "SECURITY", "CRYPTO", "OTHER") */
@@ -45,12 +47,16 @@ export function isLocalTransaction(activity: ActivityDetails): activity is Local
  * Converts an ActivityDetails to a LocalTransaction with default isNew=false
  */
 export function toLocalTransaction(activity: ActivityDetails): LocalTransaction {
+  const metadataMode = (activity.metadata?.cash_amount as Record<string, unknown> | undefined)
+    ?.mode;
+  const persistedMode =
+    activity.amountMode ??
+    (metadataMode === "calculated" || metadataMode === "custom" ? metadataMode : undefined);
   if (isLocalTransaction(activity)) {
     return {
       ...activity,
       amountMode:
-        activity.amountMode ??
-        (activity.isNew || activity.amount == null ? "calculated" : "custom"),
+        persistedMode ?? (activity.isNew || activity.amount == null ? "calculated" : "custom"),
     };
   }
   // Preserve both explicit boundary values; absence must remain distinguishable from false.
@@ -59,7 +65,7 @@ export function toLocalTransaction(activity: ActivityDetails): LocalTransaction 
   return {
     ...activity,
     isNew: false,
-    amountMode: activity.amount == null ? "calculated" : "custom",
+    amountMode: persistedMode ?? (activity.amount == null ? "calculated" : "custom"),
     isExternal,
     // Capture original values for change detection during updates
     _originalAssetSymbol: activity.assetSymbol,
@@ -149,6 +155,7 @@ interface ActivityBasePayload {
   quantity?: string | null;
   unitPrice?: string | null;
   amount?: string | null;
+  amountMode?: "calculated" | "custom";
   currency?: string;
   fee?: string | null;
   tax?: string | null;

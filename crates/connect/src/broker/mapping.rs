@@ -17,7 +17,9 @@ use wealthfolio_core::assets::{parse_crypto_pair_symbol, parse_symbol_with_known
 use wealthfolio_core::fx::currency::{
     currency_rounding_tolerance, get_normalization_rule, normalize_amount, resolve_currency,
 };
-use wealthfolio_core::portfolio::economic_events::{ActivityCashInputs, ActivityEconomicsResolver};
+use wealthfolio_core::portfolio::economic_events::{
+    ActivityCashInputs, ActivityEconomicsResolver, LegacyActivityCashClassification,
+};
 
 /// Minimum confidence score to consider a mapping reliable
 const CONFIDENCE_THRESHOLD: f64 = 0.7;
@@ -608,26 +610,65 @@ pub fn map_broker_activity(
         Decimal::ONE
     };
     let source_cash_amount = amount;
-    let amount = if fx_rate.is_none_or(|rate| rate == Decimal::ONE) {
-        ActivityEconomicsResolver::reconcile_imported_trade_amount(
-            ActivityCashInputs {
-                activity_type: &activity_type,
-                is_security_transfer: false,
-                quantity,
-                unit_price,
-                amount,
-                fee,
-                tax: None,
-                unit_multiplier,
-            },
-            currency_rounding_tolerance(&currency_code),
-        )
-    } else {
-        amount
+    let cash_inputs = ActivityCashInputs {
+        activity_type: &activity_type,
+        is_security_transfer: false,
+        quantity,
+        unit_price,
+        amount,
+        fee,
+        tax: None,
+        unit_multiplier,
     };
-    if amount != source_cash_amount {
+    let tolerance = currency_rounding_tolerance(&currency_code);
+    let classification =
+        ActivityEconomicsResolver::classify_legacy_cash_inputs(cash_inputs, tolerance);
+    let amount = match classification.classification {
+        LegacyActivityCashClassification::Gross | LegacyActivityCashClassification::Derived => {
+            classification.final_amount
+        }
+        _ => amount,
+    };
+    let expected_amount =
+        ActivityEconomicsResolver::resolve_cash_inputs(cash_inputs).expected_amount;
+    let formula_mismatch = source_cash_amount
+        .zip(expected_amount)
+        .is_some_and(|(supplied, expected)| (supplied.abs() - expected).abs() > tolerance);
+    if matches!(
+        classification.classification,
+        LegacyActivityCashClassification::Ambiguous | LegacyActivityCashClassification::Missing
+    ) || (formula_mismatch
+        && classification.classification != LegacyActivityCashClassification::Gross)
+    {
         needs_review_flag = true;
     }
+
+    let amount_mode = if matches!(
+        classification.classification,
+        LegacyActivityCashClassification::Gross
+            | LegacyActivityCashClassification::Derived
+            | LegacyActivityCashClassification::Missing
+    ) {
+        "calculated"
+    } else {
+        "custom"
+    };
+    let mut metadata_value = metadata
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(metadata) = metadata_value.as_object_mut() {
+        let cash_amount = metadata
+            .entry("cash_amount")
+            .or_insert_with(|| serde_json::json!({}));
+        if !cash_amount.is_object() {
+            *cash_amount = serde_json::json!({});
+        }
+        if let Some(cash_amount) = cash_amount.as_object_mut() {
+            cash_amount.insert("mode".to_string(), serde_json::json!(amount_mode));
+        }
+    }
+    let metadata = serde_json::to_string(&metadata_value).ok();
 
     // Determine status
     let status = if needs_review_flag {
@@ -650,6 +691,7 @@ pub fn map_broker_activity(
         fee,
         tax: None,
         amount,
+        amount_mode: Some(amount_mode.to_string()),
         status: Some(status),
         notes: activity
             .description
@@ -823,7 +865,7 @@ mod tests {
         assert_eq!(mapped.tax, None);
         assert_eq!(
             mapped.status,
-            Some(wealthfolio_core::activities::ActivityStatus::Draft)
+            Some(wealthfolio_core::activities::ActivityStatus::Posted)
         );
 
         let metadata: serde_json::Value =
@@ -849,7 +891,7 @@ mod tests {
         assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("995.00"));
         assert_eq!(
             mapped.status,
-            Some(wealthfolio_core::activities::ActivityStatus::Draft)
+            Some(wealthfolio_core::activities::ActivityStatus::Posted)
         );
         let asset = mapped.asset.expect("bond activity should produce an asset");
         assert_eq!(asset.kind.as_deref(), Some("BOND"));
@@ -922,7 +964,7 @@ mod tests {
         assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("995.00"));
         assert_eq!(
             mapped.status,
-            Some(wealthfolio_core::activities::ActivityStatus::Draft)
+            Some(wealthfolio_core::activities::ActivityStatus::Posted)
         );
     }
 
@@ -938,12 +980,11 @@ mod tests {
             fee: Some(0.0),
             ..Default::default()
         };
+        let mapped_adjusted = map_test_activity(&adjusted_drip);
+        assert_eq!(mapped_adjusted.amount.unwrap().round_dp(2), decimal("0.30"));
         assert_eq!(
-            map_test_activity(&adjusted_drip)
-                .amount
-                .unwrap()
-                .round_dp(2),
-            decimal("0.30")
+            mapped_adjusted.status,
+            Some(wealthfolio_core::activities::ActivityStatus::Draft)
         );
 
         let gross_with_fx = AccountUniversalActivity {
@@ -962,7 +1003,7 @@ mod tests {
                 .amount
                 .unwrap()
                 .round_dp(2),
-            decimal("1000.00")
+            decimal("1005.00")
         );
     }
 

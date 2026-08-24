@@ -1391,6 +1391,7 @@ mod tests {
             use crate::activities::ActivityStatus;
             // Extract asset_id before consuming other fields
             let asset_id = new_activity.get_symbol_id().map(|s| s.to_string());
+            let needs_review = new_activity.needs_review.unwrap_or(false);
             let metadata = new_activity
                 .metadata
                 .as_deref()
@@ -1425,7 +1426,7 @@ mod tests {
                 idempotency_key: new_activity.idempotency_key,
                 import_run_id: None,
                 is_user_modified: false,
-                needs_review: false,
+                needs_review,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             };
@@ -1455,9 +1456,16 @@ mod tests {
             existing.unit_price = activity_update.unit_price.unwrap_or(existing.unit_price);
             existing.amount = activity_update.amount.unwrap_or(existing.amount);
             existing.fee = activity_update.fee.unwrap_or(existing.fee);
+            existing.tax = activity_update.tax.unwrap_or(existing.tax);
             existing.currency = activity_update.currency;
             existing.fx_rate = activity_update.fx_rate.unwrap_or(existing.fx_rate);
             existing.notes = activity_update.notes;
+            if let Some(metadata) = activity_update.metadata {
+                existing.metadata = serde_json::from_str(&metadata).ok();
+            }
+            if let Some(status) = activity_update.status {
+                existing.status = status;
+            }
             existing.updated_at = Utc::now();
 
             Ok(existing.clone())
@@ -1570,6 +1578,7 @@ mod tests {
             let mut count = 0usize;
             for new_activity in _activities {
                 let asset_id = new_activity.get_symbol_id().map(|s| s.to_string());
+                let needs_review = new_activity.needs_review.unwrap_or(false);
                 let metadata = new_activity
                     .metadata
                     .as_deref()
@@ -1603,7 +1612,7 @@ mod tests {
                     idempotency_key: new_activity.idempotency_key,
                     import_run_id: new_activity.import_run_id,
                     is_user_modified: false,
-                    needs_review: false,
+                    needs_review,
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                 });
@@ -1620,10 +1629,9 @@ mod tests {
             let mut changed = 0;
             for update in updates {
                 if let Some(activity) = activities.iter_mut().find(|row| row.id == update.id) {
-                    activity.amount = Some(update.amount);
-                    if let Some(key) = update.idempotency_key {
-                        activity.idempotency_key = Some(key);
-                    }
+                    activity.amount = update.amount;
+                    activity.metadata = update.metadata;
+                    activity.needs_review = update.needs_review;
                     changed += 1;
                 }
             }
@@ -2560,7 +2568,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cash_amount_migration_only_backfills_missing_or_zero_amounts() {
+    async fn cash_amount_migration_derives_normalizes_and_flags_unclassifiable_rows() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());
         asset_service.add_asset(create_test_asset("equity", "USD"));
@@ -2568,8 +2576,9 @@ mod tests {
 
         let mut missing = create_stored_activity("missing", "acc-1", Some("equity"));
         missing.amount = None;
-        missing.idempotency_key =
-            Some(crate::activities::idempotency::compute_activity_idempotency_key(&missing));
+        let missing_key =
+            crate::activities::idempotency::compute_activity_idempotency_key(&missing);
+        missing.idempotency_key = Some(missing_key.clone());
         let mut zero = create_stored_activity("zero", "acc-1", Some("equity"));
         zero.amount = Some(Decimal::ZERO);
         zero.fee = Some(dec!(5));
@@ -2579,6 +2588,10 @@ mod tests {
         let positive = create_stored_activity("positive", "acc-1", None);
         let mut unresolved = create_stored_activity("unresolved", "acc-1", Some("missing-option"));
         unresolved.amount = None;
+        unresolved.metadata = Some(json!({
+            "cash_amount": { "source": "legacy" },
+            "other": true
+        }));
         let mut unresolved_same_asset =
             create_stored_activity("unresolved-same-asset", "acc-1", Some("missing-option"));
         unresolved_same_asset.amount = None;
@@ -2600,7 +2613,14 @@ mod tests {
         )
         .with_event_sink(event_sink.clone());
 
-        assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 2);
+        assert_eq!(
+            service
+                .migrate_activity_cash_amounts()
+                .await
+                .unwrap()
+                .changed,
+            5
+        );
         assert!(
             event_sink.events().is_empty(),
             "the startup migration performs its own rebuild and must not queue another one"
@@ -2612,28 +2632,57 @@ mod tests {
         let negative = rows.iter().find(|row| row.id == "negative").unwrap();
         let positive = rows.iter().find(|row| row.id == "positive").unwrap();
         let unresolved = rows.iter().find(|row| row.id == "unresolved").unwrap();
-        let expected_missing_key =
-            crate::activities::idempotency::compute_activity_idempotency_key(missing);
-
         assert_eq!(missing.amount, Some(dec!(100)));
         assert_eq!(
             missing.idempotency_key.as_deref(),
-            Some(expected_missing_key.as_str())
+            Some(missing_key.as_str())
         );
         assert_eq!(zero.amount, Some(dec!(105)));
-        assert_eq!(negative.amount, Some(dec!(-50)));
+        assert_eq!(negative.amount, Some(dec!(50)));
         assert_eq!(
             negative.idempotency_key.as_deref(),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
         assert_eq!(positive.amount, Some(dec!(100)));
         assert_eq!(unresolved.amount, None);
-        assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 0);
-        assert_eq!(asset_service.get_asset_by_id_call_count(), 3);
+        assert!(unresolved.needs_review);
+        assert_eq!(
+            unresolved
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/cash_amount/mode"))
+                .and_then(serde_json::Value::as_str),
+            Some("calculated")
+        );
+        assert_eq!(
+            unresolved
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/cash_amount/source"))
+                .and_then(serde_json::Value::as_str),
+            Some("legacy")
+        );
+        assert_eq!(
+            unresolved
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("other"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            service
+                .migrate_activity_cash_amounts()
+                .await
+                .unwrap()
+                .changed,
+            0
+        );
+        assert_eq!(asset_service.get_asset_by_id_call_count(), 2);
     }
 
     #[tokio::test]
-    async fn cash_amount_migration_preserves_all_nonzero_broker_amounts() {
+    async fn cash_amount_migration_converts_only_unambiguous_gross_broker_amounts() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());
         asset_service.add_asset(create_test_asset("equity", "USD"));
@@ -2750,8 +2799,15 @@ mod tests {
             Arc::new(MockQuoteService),
         );
 
-        assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 0);
-        assert_eq!(asset_service.get_asset_by_id_call_count(), 0);
+        assert_eq!(
+            service
+                .migrate_activity_cash_amounts()
+                .await
+                .unwrap()
+                .changed,
+            4
+        );
+        assert_eq!(asset_service.get_asset_by_id_call_count(), 2);
         let rows = activity_repository.activities.lock().unwrap().clone();
         let amount = |id: &str| {
             rows.iter()
@@ -2759,19 +2815,26 @@ mod tests {
                 .and_then(|activity| activity.amount)
                 .unwrap()
         };
-        assert_eq!(amount("gross-buy"), dec!(495.05));
-        assert_eq!(amount("gross-sell"), dec!(1000));
+        assert_eq!(amount("gross-buy"), dec!(500));
+        assert_eq!(amount("gross-sell"), dec!(995));
         assert_eq!(amount("final-option-buy"), dec!(605));
         assert_eq!(amount("final-rounded-sell"), dec!(5304.41));
         assert_eq!(amount("adjusted-zero-fee-buy"), dec!(0.30));
-        assert_eq!(amount("user-modified-gross"), dec!(1000));
-        assert_eq!(amount("gross-with-fx"), dec!(1000));
-        assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 0);
-        assert_eq!(asset_service.get_asset_by_id_call_count(), 0);
+        assert_eq!(amount("user-modified-gross"), dec!(1005));
+        assert_eq!(amount("gross-with-fx"), dec!(1005));
+        assert_eq!(
+            service
+                .migrate_activity_cash_amounts()
+                .await
+                .unwrap()
+                .changed,
+            0
+        );
+        assert_eq!(asset_service.get_asset_by_id_call_count(), 4);
     }
 
     #[tokio::test]
-    async fn cash_amount_migration_preserves_nonzero_amounts_for_every_supported_type() {
+    async fn cash_amount_migration_normalizes_nonzero_magnitudes_without_charges() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());
         let activity_repository = Arc::new(MockActivityRepository::new());
@@ -2814,7 +2877,14 @@ mod tests {
             Arc::new(MockQuoteService),
         );
 
-        assert_eq!(service.migrate_activity_cash_amounts().await.unwrap(), 0);
+        assert_eq!(
+            service
+                .migrate_activity_cash_amounts()
+                .await
+                .unwrap()
+                .changed,
+            5
+        );
         assert_eq!(asset_service.get_asset_by_id_call_count(), 0);
         let after: HashMap<_, _> = activity_repository
             .activities
@@ -2823,7 +2893,12 @@ mod tests {
             .iter()
             .map(|activity| (activity.id.clone(), activity.amount))
             .collect();
-        assert_eq!(after, before);
+        for (id, amount) in before {
+            assert_eq!(
+                after.get(&id).copied().flatten(),
+                amount.map(|value| value.abs())
+            );
+        }
     }
 
     #[tokio::test]
@@ -2889,7 +2964,11 @@ mod tests {
         );
 
         assert_eq!(
-            service.migrate_activity_cash_amounts().await.unwrap(),
+            service
+                .migrate_activity_cash_amounts()
+                .await
+                .unwrap()
+                .changed,
             cases.len() + 3
         );
         let rows = activity_repository.activities.lock().unwrap();
@@ -3017,6 +3096,7 @@ mod tests {
         currency: &str,
     ) -> ActivityUpdate {
         ActivityUpdate {
+            amount_mode: None,
             id: id.to_string(),
             account_id: account_id.to_string(),
             asset,
@@ -3066,6 +3146,7 @@ mod tests {
 
         let created = activity_service
             .create_activity(NewActivity {
+                amount_mode: None,
                 id: Some("transfer-1".to_string()),
                 account_id: "acc-1".to_string(),
                 asset: Some(AssetResolutionInput {
@@ -3104,7 +3185,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_price_bearing_activity_preserves_trusted_amount_when_account_changes() {
+    async fn test_update_price_bearing_activity_recalculates_when_economics_change() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());
         let fx_service = Arc::new(MockFxService::new());
@@ -3125,11 +3206,17 @@ mod tests {
         existing.quantity = Some(dec!(1));
         existing.unit_price = Some(dec!(100));
         existing.currency = "USD".to_string();
-        activity_repository
-            .activities
-            .lock()
-            .unwrap()
-            .push(existing);
+        let mut unchanged_custom = existing.clone();
+        unchanged_custom.id = "unchanged-custom".to_string();
+        unchanged_custom.amount = Some(dec!(999));
+        unchanged_custom.metadata = Some(json!({ "cash_amount": { "mode": "custom" } }));
+        let mut changed_custom = unchanged_custom.clone();
+        changed_custom.id = "changed-custom".to_string();
+        activity_repository.activities.lock().unwrap().extend([
+            existing,
+            unchanged_custom,
+            changed_custom,
+        ]);
 
         let quote_service = Arc::new(MockQuoteService);
         let activity_service = ActivityService::new(
@@ -3142,6 +3229,7 @@ mod tests {
 
         let updated = activity_service
             .update_activity(ActivityUpdate {
+                amount_mode: None,
                 id: "activity-1".to_string(),
                 account_id: "acc-cad".to_string(),
                 asset: Some(AssetResolutionInput {
@@ -3157,7 +3245,7 @@ mod tests {
                 currency: "CAD".to_string(),
                 fee: Some(Some(dec!(0))),
                 tax: None,
-                amount: None,
+                amount: Some(Some(dec!(100))),
                 status: None,
                 notes: None,
                 fx_rate: None,
@@ -3167,9 +3255,52 @@ mod tests {
             .expect("update should succeed");
 
         assert_eq!(updated.account_id, "acc-cad");
-        assert_eq!(updated.amount, Some(dec!(100)));
+        assert_eq!(updated.amount, Some(dec!(140)));
         assert_eq!(updated.quantity, Some(dec!(2)));
         assert_eq!(updated.unit_price, Some(dec!(70)));
+
+        let custom_update = |id: &str, quantity: Decimal| ActivityUpdate {
+            amount_mode: Some("custom".to_string()),
+            id: id.to_string(),
+            account_id: "acc-usd".to_string(),
+            asset: Some(AssetResolutionInput {
+                id: Some("asset-aapl".to_string()),
+                ..Default::default()
+            }),
+            activity_type: ACTIVITY_TYPE_BUY.to_string(),
+            subtype: None,
+            activity_date: "2024-01-15".to_string(),
+            settlement_date: None,
+            quantity: Some(Some(quantity)),
+            unit_price: Some(Some(dec!(100))),
+            currency: "USD".to_string(),
+            fee: Some(Some(Decimal::ZERO)),
+            tax: None,
+            amount: Some(Some(dec!(999))),
+            status: None,
+            notes: None,
+            fx_rate: None,
+            metadata: None,
+        };
+        let unchanged = activity_service
+            .update_activity(custom_update("unchanged-custom", dec!(1)))
+            .await
+            .expect("unchanged economics must preserve a custom total");
+        assert_eq!(unchanged.amount, Some(dec!(999)));
+
+        let recalculated = activity_service
+            .update_activity(custom_update("changed-custom", dec!(2)))
+            .await
+            .expect("changed economics must invalidate a stale custom total");
+        assert_eq!(recalculated.amount, Some(dec!(200)));
+        assert_eq!(
+            recalculated
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/cash_amount/mode"))
+                .and_then(serde_json::Value::as_str),
+            Some("calculated")
+        );
     }
 
     #[tokio::test]
@@ -3197,6 +3328,48 @@ mod tests {
             .expect("a zero placeholder should derive from the supplied cash details");
 
         assert_eq!(created.amount, Some(dec!(19)));
+
+        let mut mode_activity =
+            create_test_cash_create("mode-deposit", "acc-1", ACTIVITY_TYPE_DEPOSIT, "USD");
+        mode_activity.quantity = Some(dec!(3));
+        mode_activity.unit_price = Some(dec!(10));
+        mode_activity.amount = Some(dec!(999));
+        mode_activity.amount_mode = Some("calculated".to_string());
+        mode_activity.fee = Some(dec!(1));
+        mode_activity.metadata = Some(
+            serde_json::json!({
+                "cash_amount": { "mode": "custom", "confirmed": true },
+                "source": "test"
+            })
+            .to_string(),
+        );
+
+        let created = activity_service
+            .create_activity(mode_activity)
+            .await
+            .expect("top-level calculated mode should override a supplied total");
+        assert_eq!(created.amount, Some(dec!(29)));
+        assert_eq!(
+            created
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/cash_amount/mode"))
+                .and_then(serde_json::Value::as_str),
+            Some("calculated")
+        );
+        assert_eq!(
+            created
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/source"))
+                .and_then(serde_json::Value::as_str),
+            Some("test")
+        );
+        assert!(created
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/cash_amount/confirmed"))
+            .is_none());
     }
 
     #[tokio::test]
@@ -3242,7 +3415,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_bond_price_bearing_activity_preserves_authoritative_amount() {
+    async fn test_update_bond_price_bearing_activity_recalculates_with_bond_multiplier() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());
         let fx_service = Arc::new(MockFxService::new());
@@ -3278,6 +3451,7 @@ mod tests {
 
         let updated = activity_service
             .update_activity(ActivityUpdate {
+                amount_mode: None,
                 id: "activity-1".to_string(),
                 account_id: "acc-usd".to_string(),
                 asset: Some(AssetResolutionInput {
@@ -3302,7 +3476,7 @@ mod tests {
             .await
             .expect("update should succeed");
 
-        assert_eq!(updated.amount, Some(dec!(990)));
+        assert_eq!(updated.amount, Some(dec!(980)));
         assert_eq!(updated.quantity, Some(dec!(1000)));
         assert_eq!(updated.unit_price, Some(dec!(98)));
     }
@@ -3326,6 +3500,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("split-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -3384,6 +3559,7 @@ mod tests {
         .with_event_sink(event_sink.clone());
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("split-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -3536,6 +3712,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "card-1".to_string(),
             asset: None,
@@ -3581,6 +3758,7 @@ mod tests {
         currency: &str,
     ) -> NewActivity {
         NewActivity {
+            amount_mode: None,
             id: Some(id.to_string()),
             account_id: account_id.to_string(),
             asset: None,
@@ -3852,6 +4030,7 @@ mod tests {
         let result = activity_service
             .prepare_activities_for_sync(
                 vec![NewActivity {
+                    amount_mode: None,
                     id: Some("card-buy".to_string()),
                     account_id: "card-1".to_string(),
                     asset: Some(AssetResolutionInput {
@@ -3928,6 +4107,7 @@ mod tests {
 
         // Create activity with USD currency (same as account) but for EUR asset
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -4003,6 +4183,7 @@ mod tests {
 
         // Create activity with EUR currency (different from account USD)
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -4069,6 +4250,7 @@ mod tests {
         );
 
         let duplicate_activity = NewActivity {
+            amount_mode: None,
             id: None,
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -4133,6 +4315,7 @@ mod tests {
         );
 
         let taxable_activity = NewActivity {
+            amount_mode: None,
             id: None,
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -4201,6 +4384,7 @@ mod tests {
         );
 
         let provider_activity_one = NewActivity {
+            amount_mode: None,
             id: None,
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -4263,6 +4447,7 @@ mod tests {
 
         let request = ActivityBulkMutationRequest {
             creates: vec![NewActivity {
+                amount_mode: None,
                 id: Some("temp-1".to_string()),
                 account_id: "acc-1".to_string(),
                 asset: Some(AssetResolutionInput {
@@ -4592,6 +4777,7 @@ mod tests {
 
         // Create activity with USD currency (same as account and asset)
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -4670,6 +4856,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -4740,6 +4927,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -4799,6 +4987,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-missing-quote".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -4858,6 +5047,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("staking-reward-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: None,
@@ -4919,6 +5109,7 @@ mod tests {
 
         let activity = activity_service
             .create_activity(NewActivity {
+                amount_mode: None,
                 id: Some("staking-reward-lowercase".to_string()),
                 account_id: "acc-1".to_string(),
                 asset: Some(AssetResolutionInput {
@@ -4979,6 +5170,7 @@ mod tests {
 
         let activity = activity_service
             .create_activity(NewActivity {
+                amount_mode: None,
                 id: Some("staking-reward-negative".to_string()),
                 account_id: "acc-1".to_string(),
                 asset: Some(AssetResolutionInput {
@@ -5036,6 +5228,7 @@ mod tests {
         let result = activity_service
             .prepare_activities_for_sync(
                 vec![NewActivity {
+                    amount_mode: None,
                     id: Some("option-buy".to_string()),
                     account_id: "acc-1".to_string(),
                     asset: Some(AssetResolutionInput {
@@ -5098,6 +5291,7 @@ mod tests {
         let result = activity_service
             .prepare_activities_for_import(
                 vec![NewActivity {
+                    amount_mode: None,
                     id: Some("gbp-tax-import".to_string()),
                     account_id: "acc-1".to_string(),
                     asset: Some(AssetResolutionInput {
@@ -5162,6 +5356,7 @@ mod tests {
         let result = activity_service
             .prepare_activities_for_sync(
                 vec![NewActivity {
+                    amount_mode: None,
                     id: Some("staking-cash-only".to_string()),
                     account_id: "acc-1".to_string(),
                     asset: None,
@@ -5223,6 +5418,7 @@ mod tests {
         let result = activity_service
             .prepare_activities_for_sync(
                 vec![NewActivity {
+                    amount_mode: None,
                     id: Some("staking-invalid-symbol".to_string()),
                     account_id: "acc-1".to_string(),
                     asset: Some(AssetResolutionInput {
@@ -5286,6 +5482,7 @@ mod tests {
         let result = activity_service
             .prepare_activities_for_sync(
                 vec![NewActivity {
+                    amount_mode: None,
                     id: Some("interest-drip-label".to_string()),
                     account_id: "acc-1".to_string(),
                     asset: None,
@@ -5343,6 +5540,7 @@ mod tests {
         let result = activity_service
             .prepare_activities_for_sync(
                 vec![NewActivity {
+                    amount_mode: None,
                     id: Some("credit-staking-label".to_string()),
                     account_id: "acc-1".to_string(),
                     asset: None,
@@ -5403,6 +5601,7 @@ mod tests {
 
         let request = ActivityBulkMutationRequest {
             creates: vec![NewActivity {
+                amount_mode: None,
                 id: Some("temp-1".to_string()),
                 account_id: "acc-1".to_string(),
                 asset: Some(AssetResolutionInput {
@@ -5483,6 +5682,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -5659,6 +5859,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-missing-asset".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -5725,6 +5926,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-aapl".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -5804,6 +6006,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-zaaa".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -5878,6 +6081,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-shop".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -5939,6 +6143,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-transient".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -6004,6 +6209,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: None,
@@ -6060,6 +6266,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: None,
@@ -6116,6 +6323,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: None, // No asset info
@@ -6179,6 +6387,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -6249,6 +6458,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -6320,6 +6530,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -6392,6 +6603,7 @@ mod tests {
 
         // ETH would be inferred as crypto, but exchange_mic forces security
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -6464,6 +6676,7 @@ mod tests {
             );
 
             let new_activity = NewActivity {
+                amount_mode: None,
                 id: Some(format!("activity-{}", activity_type)),
                 account_id: "acc-1".to_string(),
                 asset: None,
@@ -6535,6 +6748,7 @@ mod tests {
         // Create bulk mutation request
         let request = ActivityBulkMutationRequest {
             creates: vec![NewActivity {
+                amount_mode: None,
                 id: Some("activity-1".to_string()),
                 account_id: "acc-1".to_string(),
                 asset: Some(AssetResolutionInput {
@@ -8726,6 +8940,7 @@ mod tests {
             force_import: false,
             is_external: None,
         };
+        let option_template = option_buy.clone();
 
         let checked = activity_service
             .check_activities_import(vec![option_buy])
@@ -8757,6 +8972,73 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].amount, Some(dec!(503)));
 
+        let exact_gross = ActivityImport {
+            date: "2024-01-17".to_string(),
+            amount: Some(dec!(500)),
+            line_number: Some(2),
+            ..option_template.clone()
+        };
+        let checked_gross = activity_service
+            .check_activities_import(vec![exact_gross])
+            .await
+            .expect("an exact legacy gross amount should be classifiable");
+        assert!(!checked_gross[0].is_draft);
+        assert!(checked_gross[0]
+            .warnings
+            .as_ref()
+            .is_none_or(|warnings| !warnings.contains_key("amount")));
+        activity_service
+            .import_activities(checked_gross)
+            .await
+            .expect("exact gross import should convert to final magnitude");
+
+        let mismatched = ActivityImport {
+            date: "2024-01-18".to_string(),
+            amount: Some(dec!(5000)),
+            line_number: Some(3),
+            ..option_template
+        };
+        let checked_mismatch = activity_service
+            .check_activities_import(vec![mismatched])
+            .await
+            .expect("a scale mismatch should remain reviewable");
+        assert!(checked_mismatch[0].is_draft);
+        assert!(checked_mismatch[0]
+            .warnings
+            .as_ref()
+            .is_some_and(|warnings| warnings.contains_key("amount")));
+        activity_service
+            .import_activities(checked_mismatch)
+            .await
+            .expect("ambiguous import should be retained as Draft");
+
+        let stored = activity_repository
+            .get_activities()
+            .expect("stored activities should be readable");
+        assert_eq!(stored.len(), 3);
+        let converted = stored
+            .iter()
+            .find(|activity| activity.activity_date.date_naive().to_string() == "2024-01-17")
+            .expect("converted gross activity");
+        assert_eq!(converted.amount, Some(dec!(503)));
+        assert_eq!(converted.status, ActivityStatus::Posted);
+        assert!(!converted.needs_review);
+        assert_eq!(
+            converted
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/cash_amount/mode"))
+                .and_then(serde_json::Value::as_str),
+            Some("calculated")
+        );
+        let ambiguous = stored
+            .iter()
+            .find(|activity| activity.activity_date.date_naive().to_string() == "2024-01-18")
+            .expect("ambiguous activity");
+        assert_eq!(ambiguous.amount, Some(dec!(5000)));
+        assert_eq!(ambiguous.status, ActivityStatus::Draft);
+        assert!(ambiguous.needs_review);
+
         let unresolved_deposit = ActivityImport {
             id: None,
             date: "2024-01-16".to_string(),
@@ -8784,7 +9066,7 @@ mod tests {
             duplicate_of_line_number: None,
             is_draft: false,
             is_valid: true,
-            line_number: Some(2),
+            line_number: Some(4),
             fx_rate: None,
             subtype: None,
             asset_id: None,
@@ -8803,7 +9085,7 @@ mod tests {
             .errors
             .as_ref()
             .is_some_and(|errors| errors.contains_key("amount")));
-        assert_eq!(activity_repository.get_activities().unwrap().len(), 1);
+        assert_eq!(activity_repository.get_activities().unwrap().len(), 3);
     }
 
     #[tokio::test]
@@ -10380,9 +10662,19 @@ mod tests {
                 activity.source_group_id.is_none(),
                 "same-account different-currency cash transfers without FX provenance should not be auto-linked"
             );
+            let metadata = activity
+                .metadata
+                .as_ref()
+                .expect("amount provenance metadata");
             assert!(
-                activity.metadata.is_none(),
+                metadata.get("fx").is_none(),
                 "unlinked internal rows should not gain generated FX metadata"
+            );
+            assert_eq!(
+                metadata
+                    .pointer("/cash_amount/mode")
+                    .and_then(serde_json::Value::as_str),
+                Some("custom")
             );
         }
     }
@@ -11727,6 +12019,7 @@ mod tests {
             .bulk_mutate_activities(ActivityBulkMutationRequest {
                 creates: vec![],
                 updates: vec![ActivityUpdate {
+                    amount_mode: None,
                     id: "cash-activity".to_string(),
                     account_id: "acc-usd".to_string(),
                     asset: None,
@@ -11781,46 +12074,66 @@ mod tests {
             Some("VWRL@XLON"),
             Some(dec!(1)),
             Some(dec!(100)),
-            Some(dec!(100)),
             None,
+            Some(dec!(1)),
             "GBP",
             None,
             None,
         );
+        let existing = Activity {
+            id: "existing-dup".to_string(),
+            account_id: "acc-1".to_string(),
+            asset_id: None,
+            activity_type: "BUY".to_string(),
+            activity_type_override: None,
+            source_type: None,
+            subtype: None,
+            status: ActivityStatus::Posted,
+            activity_date: date,
+            settlement_date: None,
+            quantity: Some(dec!(1)),
+            unit_price: Some(dec!(100)),
+            amount: None,
+            fee: Some(dec!(1)),
+            tax: None,
+            currency: "GBP".to_string(),
+            fx_rate: None,
+            notes: None,
+            metadata: None,
+            source_system: Some("CSV".to_string()),
+            source_record_id: None,
+            source_group_id: None,
+            idempotency_key: Some(existing_key),
+            import_run_id: None,
+            is_user_modified: false,
+            needs_review: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let legacy_gross_date = date + chrono::Duration::days(1);
+        let legacy_gross_key = crate::activities::compute_idempotency_key(
+            "acc-1",
+            "BUY",
+            &legacy_gross_date,
+            Some("VWRL@XLON"),
+            Some(dec!(1)),
+            Some(dec!(100)),
+            Some(dec!(100)),
+            Some(dec!(1)),
+            "GBP",
+            None,
+            None,
+        );
+        let mut legacy_gross = existing.clone();
+        legacy_gross.id = "existing-gross-key".to_string();
+        legacy_gross.activity_date = legacy_gross_date;
+        legacy_gross.amount = Some(dec!(100));
+        legacy_gross.idempotency_key = Some(legacy_gross_key);
         activity_repository
             .activities
             .lock()
             .unwrap()
-            .push(Activity {
-                id: "existing-dup".to_string(),
-                account_id: "acc-1".to_string(),
-                asset_id: None,
-                activity_type: "BUY".to_string(),
-                activity_type_override: None,
-                source_type: None,
-                subtype: None,
-                status: ActivityStatus::Posted,
-                activity_date: date,
-                settlement_date: None,
-                quantity: Some(dec!(1)),
-                unit_price: Some(dec!(100)),
-                amount: Some(dec!(100)),
-                fee: Some(dec!(0)),
-                tax: None,
-                currency: "GBP".to_string(),
-                fx_rate: None,
-                notes: None,
-                metadata: None,
-                source_system: Some("CSV".to_string()),
-                source_record_id: None,
-                source_group_id: None,
-                idempotency_key: Some(existing_key),
-                import_run_id: None,
-                is_user_modified: false,
-                needs_review: false,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            });
+            .extend([existing, legacy_gross]);
 
         let quote_service = Arc::new(MockQuoteService);
         let activity_service = ActivityService::new(
@@ -11839,9 +12152,9 @@ mod tests {
             quantity: Some(dec!(1)),
             unit_price: Some(dec!(100)),
             currency: "GBP".to_string(),
-            fee: Some(dec!(0)),
+            fee: Some(dec!(1)),
             tax: None,
-            amount: Some(dec!(100)),
+            amount: None,
             comment: None,
             account_id: Some("acc-1".to_string()),
             account_name: None,
@@ -11867,6 +12180,23 @@ mod tests {
             is_external: None,
         };
 
+        let reviewed = activity_service
+            .check_activities_import(vec![duplicate.clone()])
+            .await
+            .expect("import review should succeed");
+        assert_eq!(
+            reviewed[0].duplicate_of_id.as_deref(),
+            Some("existing-dup"),
+            "review must recognize the pre-final-amount idempotency key"
+        );
+
+        let final_duplicate = ActivityImport {
+            date: "2024-01-16".to_string(),
+            amount: Some(dec!(101)),
+            line_number: Some(2),
+            ..duplicate.clone()
+        };
+
         let result = activity_service
             .import_activities(vec![duplicate])
             .await
@@ -11881,10 +12211,30 @@ mod tests {
             Some("existing-dup")
         );
 
+        let reviewed_final = activity_service
+            .check_activities_import(vec![final_duplicate.clone()])
+            .await
+            .expect("review should check the legacy gross key");
+        assert_eq!(
+            reviewed_final[0].duplicate_of_id.as_deref(),
+            Some("existing-gross-key"),
+            "a canonical final amount must match an older gross-amount key"
+        );
+        let final_result = activity_service
+            .import_activities(vec![final_duplicate])
+            .await
+            .expect("apply should check the same legacy gross key");
+        assert_eq!(final_result.summary.imported, 0);
+        assert_eq!(final_result.summary.duplicates, 1);
+        assert_eq!(
+            final_result.activities[0].duplicate_of_id.as_deref(),
+            Some("existing-gross-key")
+        );
+
         let stored = activity_repository
             .get_activities()
             .expect("stored activities should be readable");
-        assert_eq!(stored.len(), 1, "duplicate row should not be inserted");
+        assert_eq!(stored.len(), 2, "duplicate rows should not be inserted");
     }
 
     #[tokio::test]
@@ -12326,6 +12676,7 @@ mod tests {
 
         // User submits activity in GBp (pence) - 14082 pence per share
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -12418,6 +12769,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -12483,6 +12835,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -12548,6 +12901,7 @@ mod tests {
         );
 
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -13153,6 +13507,7 @@ mod tests {
 
         // OCC symbol with no explicit kind input — should be inferred as OPTION
         let new_activity = NewActivity {
+            amount_mode: None,
             id: Some("activity-occ-1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -13286,6 +13641,7 @@ mod tests {
         ]);
 
         let update = crate::activities::ActivityUpdate {
+            amount_mode: None,
             id: "transfer-out".to_string(),
             account_id: "acc-out".to_string(),
             asset: None,
@@ -13342,6 +13698,7 @@ mod tests {
 
         activity_service
             .update_activity(crate::activities::ActivityUpdate {
+                amount_mode: None,
                 id: "transfer-out".to_string(),
                 account_id: "acc-out".to_string(),
                 asset: None,
@@ -13379,6 +13736,7 @@ mod tests {
 
         let currency_change = activity_service
             .update_activity(crate::activities::ActivityUpdate {
+                amount_mode: None,
                 id: "transfer-out".to_string(),
                 account_id: "acc-eur".to_string(),
                 asset: None,

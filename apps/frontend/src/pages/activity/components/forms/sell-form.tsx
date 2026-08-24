@@ -155,6 +155,8 @@ export const createSellFormSchema = (t?: TFunction) =>
       contractMultiplier: z.coerce.number().positive().default(100).optional(),
       assetContractMultiplier: z.coerce.number().positive().default(100).optional(),
       activityMetadata: z.record(z.string(), z.unknown()).optional(),
+      amountMode: z.enum(["calculated", "custom"]).optional(),
+      amountConfirmed: z.boolean().optional(),
     })
     .superRefine((data, ctx) => {
       // Options build their symbol at submit time; stocks/bonds require it upfront
@@ -279,6 +281,8 @@ export function SellForm({
       fee: 0,
       tax: 0,
       amount: undefined,
+      amountMode: "calculated",
+      amountConfirmed: false,
       comment: null,
       subtype: null,
       fxRate: undefined,
@@ -368,7 +372,7 @@ export function SellForm({
     const p = Number(optUnitPrice) || 0;
     const multiplier = isOption ? Number(optMultiplier) || 100 : assetMultiplier;
     const total = q * p * multiplier - Number(optFee || 0) - Number(optTax || 0);
-    return q > 0 && p > 0 && total > 0 ? total : 0;
+    return q > 0 && p > 0 ? total : 0;
   }, [assetMultiplier, isOption, optFee, optMultiplier, optQuantity, optTax, optUnitPrice]);
 
   const handleAssetTypeChange = (value: AssetType) => {
@@ -669,6 +673,7 @@ export function SellForm({
             side="sell"
             calculatedAmount={calculatedCashAmount}
             initialAmount={defaultValues?.amount}
+            initialAmountMode={defaultValues?.amountMode}
             currency={currency}
           />
 

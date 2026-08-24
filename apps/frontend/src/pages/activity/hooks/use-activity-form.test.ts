@@ -292,7 +292,7 @@ describe("useActivityForm", () => {
         id: "transfer-in-id",
         accountId: "acc-cad",
         activityType: ActivityType.TRANSFER_IN,
-        metadata: { flow: { is_external: true } },
+        metadata: expect.objectContaining({ flow: { is_external: true } }),
       }),
     );
     expect(mutationMocks.unlinkMutateAsync.mock.invocationCallOrder[0]).toBeLessThan(

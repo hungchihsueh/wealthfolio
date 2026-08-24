@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { DividendForm } from "../dividend-form";
 import { SplitForm } from "../split-form";
@@ -39,10 +39,26 @@ vi.mock("../fields", () => ({
   DatePicker: ({ name, label }: { name: string; label: string }) => (
     <div data-testid={`date-picker-${name}`}>{label}</div>
   ),
-  AmountInput: ({ name, label }: { name: string; label: string }) => (
+  AmountInput: ({
+    name,
+    label,
+    onValueChange,
+  }: {
+    name: string;
+    label: string;
+    onValueChange?: (value: number | undefined) => void;
+  }) => (
     <div>
       <label htmlFor={name}>{label}</label>
-      <input data-testid={`input-${name}`} name={name} type="number" id={name} />
+      <input
+        data-testid={`input-${name}`}
+        name={name}
+        type="number"
+        id={name}
+        onChange={(event) =>
+          onValueChange?.(event.target.value === "" ? undefined : Number(event.target.value))
+        }
+      />
     </div>
   ),
   QuantityInput: ({
@@ -80,7 +96,7 @@ vi.mock("../fields", () => ({
       {children}
     </div>
   ),
-  createValidatedSubmit: vi.fn((_form, handler) => handler),
+  createValidatedSubmit: vi.fn((form, handler) => form.handleSubmit(handler)),
 }));
 
 // Mock UI components
@@ -230,6 +246,37 @@ describe("DividendForm", () => {
 
       expect(mockOnCancel).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("marks an entered cash dividend total as custom and confirmed", async () => {
+    const user = userEvent.setup();
+    render(
+      <DividendForm
+        accounts={mockAccounts}
+        defaultValues={{
+          accountId: "acc-1",
+          symbol: "AAPL",
+          activityDate: new Date("2026-08-24T12:00:00Z"),
+          amount: 25,
+          amountMode: "calculated",
+          currency: "USD",
+        }}
+        onSubmit={mockOnSubmit}
+      />,
+    );
+
+    await user.type(screen.getByTestId("input-amount"), "25");
+    await user.click(screen.getByRole("button", { name: /add dividend/i }));
+
+    await waitFor(() =>
+      expect(mockOnSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          amount: 25,
+          amountMode: "custom",
+          amountConfirmed: true,
+        }),
+      ),
+    );
   });
 
   describe("Form Structure", () => {

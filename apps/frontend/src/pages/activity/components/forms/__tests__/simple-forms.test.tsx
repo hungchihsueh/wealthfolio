@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { WithdrawalForm } from "../withdrawal-form";
 import { FeeForm } from "../fee-form";
@@ -35,10 +35,26 @@ vi.mock("../fields", () => ({
   DatePicker: ({ name, label }: { name: string; label: string }) => (
     <div data-testid={`date-picker-${name}`}>{label}</div>
   ),
-  AmountInput: ({ name, label }: { name: string; label: string }) => (
+  AmountInput: ({
+    name,
+    label,
+    onValueChange,
+  }: {
+    name: string;
+    label: string;
+    onValueChange?: (value: number | undefined) => void;
+  }) => (
     <div>
       <label htmlFor={name}>{label}</label>
-      <input data-testid={`input-${name}`} name={name} type="number" id={name} />
+      <input
+        data-testid={`input-${name}`}
+        name={name}
+        type="number"
+        id={name}
+        onChange={(event) =>
+          onValueChange?.(event.target.value === "" ? undefined : Number(event.target.value))
+        }
+      />
     </div>
   ),
   QuantityInput: ({ name, label }: { name: string; label: string }) => (
@@ -65,7 +81,7 @@ vi.mock("../fields", () => ({
   SymbolSearch: ({ name, label }: { name: string; label: string }) => (
     <div data-testid={`symbol-search-${name}`}>{label}</div>
   ),
-  createValidatedSubmit: vi.fn((_form, handler) => handler),
+  createValidatedSubmit: vi.fn((form, handler) => form.handleSubmit(handler)),
 }));
 
 // Mock UI components
@@ -291,6 +307,36 @@ describe("InterestForm", () => {
 
       expect(screen.getByRole("button", { name: /cancel/i })).toBeInTheDocument();
     });
+  });
+
+  it("marks an entered cash interest total as custom and confirmed", async () => {
+    const user = userEvent.setup();
+    render(
+      <InterestForm
+        accounts={mockAccounts}
+        defaultValues={{
+          accountId: "acc-1",
+          activityDate: new Date("2026-08-24T12:00:00Z"),
+          amount: 15,
+          amountMode: "calculated",
+          currency: "USD",
+        }}
+        onSubmit={mockOnSubmit}
+      />,
+    );
+
+    await user.type(screen.getByTestId("input-amount"), "15");
+    await user.click(screen.getByRole("button", { name: /add interest/i }));
+
+    await waitFor(() =>
+      expect(mockOnSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          amount: 15,
+          amountMode: "custom",
+          amountConfirmed: true,
+        }),
+      ),
+    );
   });
 });
 

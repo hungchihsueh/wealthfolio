@@ -135,8 +135,12 @@ impl HoldingsCalculator {
         activity_type: &ActivityType,
         account_currency: &str,
     ) -> Result<()> {
-        let charge =
-            ActivityEconomicsResolver::resolve_cash(activity, Decimal::ONE).signed_cash_effect;
+        let resolved = ActivityEconomicsResolver::resolve_cash_with_account_context(
+            activity,
+            Decimal::ONE,
+            *activity_type == ActivityType::Interest,
+        );
+        let charge = resolved.signed_cash_effect;
 
         if charge == Decimal::ZERO {
             let expected_fields = match activity_type {

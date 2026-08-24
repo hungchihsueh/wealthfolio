@@ -96,6 +96,17 @@ describe("activity AmountInput field", () => {
     expect(screen.getByRole("status", { name: "form value" })).toHaveTextContent("12.345");
   });
 
+  it("keeps a leading zero while entering a fractional total", async () => {
+    const user = userEvent.setup();
+    render(<TestForm currency="USD" />);
+
+    const input = screen.getByRole<HTMLInputElement>("textbox", { name: "Amount" });
+    await user.type(input, "0.3");
+
+    expect(input).toHaveValue("0.3");
+    expect(screen.getByRole("status", { name: "form value" })).toHaveTextContent("0.3");
+  });
+
   it("renders React Hook Form validation errors on the input", async () => {
     const user = userEvent.setup();
     render(<TestForm currency="USD" />);

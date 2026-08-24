@@ -37,6 +37,8 @@ export const baseActivitySchema = z.object({
   assetContractMultiplier: z.coerce.number().positive().optional(),
   // Existing activity metadata is carried through edit forms unless explicitly changed.
   metadata: z.record(z.string(), z.unknown()).optional(),
+  amountMode: z.enum(["calculated", "custom"]).optional(),
+  amountConfirmed: z.boolean().optional(),
 });
 
 // Transfer schema: TRANSFER_IN/OUT supports both cash (amount) and securities (assetId + quantity + unitPrice)

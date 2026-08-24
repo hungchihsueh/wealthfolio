@@ -264,6 +264,7 @@ mod tests {
 
     fn create_test_new_activity() -> NewActivity {
         NewActivity {
+            amount_mode: None,
             id: None,
             account_id: "account-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -535,6 +536,7 @@ mod tests {
 
     fn create_test_activity_update() -> ActivityUpdate {
         ActivityUpdate {
+            amount_mode: None,
             id: "activity-1".to_string(),
             account_id: "account-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -623,6 +625,7 @@ mod tests {
             "activityType": "BUY",
             "activityDate": "2024-01-15",
             "currency": "USD",
+            "amountMode": "calculated",
             "quantity": "1e-7",
             "unitPrice": 2.5e3,
             "subtype": null,
@@ -642,6 +645,7 @@ mod tests {
         assert_eq!(parsed.subtype, Some(String::new()));
         assert_eq!(parsed.fee, Some(None));
         assert_eq!(parsed.amount, None);
+        assert_eq!(parsed.amount_mode.as_deref(), Some("calculated"));
     }
 
     #[test]
@@ -693,6 +697,7 @@ mod tests {
             "activityDate": "2024-01-15",
             "currency": "USD",
             "amount": "9.7e-7",
+            "amountMode": "custom",
             "fee": ""
         });
 
@@ -702,6 +707,7 @@ mod tests {
             Some(Decimal::from_scientific("9.7e-7").unwrap())
         );
         assert_eq!(parsed.fee, None);
+        assert_eq!(parsed.amount_mode.as_deref(), Some("custom"));
     }
 
     // ============================================================================
@@ -838,6 +844,7 @@ mod tests {
     #[test]
     fn test_new_activity_symbol_helpers() {
         let activity = NewActivity {
+            amount_mode: None,
             id: Some("a1".to_string()),
             account_id: "acc-1".to_string(),
             asset: Some(AssetResolutionInput {
@@ -1018,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn test_activity_import_to_new_activity_omits_metadata_when_not_external() {
+    fn test_activity_import_to_new_activity_omits_flow_metadata_when_not_external() {
         let import = ActivityImport {
             id: None,
             date: "2024-01-15".to_string(),
@@ -1055,7 +1062,12 @@ mod tests {
             is_external: Some(false),
         };
 
-        assert!(NewActivity::from(import).metadata.is_none());
+        let converted = NewActivity::from(import);
+        let metadata: serde_json::Value =
+            serde_json::from_str(converted.metadata.as_deref().unwrap_or("{}"))
+                .expect("valid cash metadata");
+        assert!(metadata.get("flow").is_none());
+        assert_eq!(metadata["cash_amount"]["mode"], "calculated");
     }
 
     #[test]
@@ -1096,6 +1108,11 @@ mod tests {
             is_external: Some(true),
         };
 
-        assert!(NewActivity::from(import).metadata.is_none());
+        let converted = NewActivity::from(import);
+        let metadata: serde_json::Value =
+            serde_json::from_str(converted.metadata.as_deref().unwrap_or("{}"))
+                .expect("valid cash metadata");
+        assert!(metadata.get("flow").is_none());
+        assert_eq!(metadata["cash_amount"]["mode"], "calculated");
     }
 }

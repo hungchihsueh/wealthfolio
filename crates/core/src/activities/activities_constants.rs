@@ -107,6 +107,12 @@ pub fn is_cash_symbol(symbol: &str) -> bool {
     false
 }
 
+/// A placeholder that cannot reasonably be a listed security symbol. Bare
+/// `CASH` is excluded because it is also a real NASDAQ ticker.
+fn is_definite_cash_placeholder(symbol: &str) -> bool {
+    is_cash_symbol(symbol) && !symbol.trim().eq_ignore_ascii_case("CASH")
+}
+
 /// Returns true for symbols that are clearly not real tickers (all dashes, `$`-prefixed junk, etc.).
 pub fn is_garbage_symbol(symbol: &str) -> bool {
     let s = symbol.trim();
@@ -172,7 +178,7 @@ pub fn classify_import_activity(
 
     // 1. DIVIDEND: optional symbol — resolve asset if provided, cash income if not
     if activity_type == ACTIVITY_TYPE_DIVIDEND {
-        if sym.is_empty() || is_cash_symbol(sym) || is_garbage_symbol(sym) {
+        if sym.is_empty() || is_definite_cash_placeholder(sym) || is_garbage_symbol(sym) {
             return ImportSymbolDisposition::CashMovement;
         }
         return ImportSymbolDisposition::ResolveAsset;
@@ -180,7 +186,7 @@ pub fn classify_import_activity(
 
     // 1b. ADJUSTMENT: optional symbol — resolve asset if provided, cash correction if not
     if activity_type == ACTIVITY_TYPE_ADJUSTMENT {
-        if sym.is_empty() || is_cash_symbol(sym) || is_garbage_symbol(sym) {
+        if sym.is_empty() || is_definite_cash_placeholder(sym) || is_garbage_symbol(sym) {
             return ImportSymbolDisposition::CashMovement;
         }
         return ImportSymbolDisposition::ResolveAsset;
@@ -192,7 +198,7 @@ pub fn classify_import_activity(
     }
 
     // 2. No meaningful symbol → cash
-    if sym.is_empty() || is_cash_symbol(sym) || is_garbage_symbol(sym) {
+    if sym.is_empty() || is_definite_cash_placeholder(sym) || is_garbage_symbol(sym) {
         return ImportSymbolDisposition::CashMovement;
     }
 
@@ -422,8 +428,10 @@ mod tests {
     #[test]
     fn test_classify_dividend_optional_symbol() {
         assert!(is_resolve(&classify("DIVIDEND", "AAPL", None, None)));
+        assert!(is_resolve(&classify("DIVIDEND", "CASH", None, None)));
         // No symbol → cash income (portfolio-level dividend)
         assert!(is_cash(&classify("DIVIDEND", "", None, None)));
+        assert!(is_cash(&classify("DIVIDEND", "$CASH", None, None)));
         assert!(is_cash(&classify("DIVIDEND", "$CASH-CAD", None, None)));
     }
 
@@ -437,6 +445,7 @@ mod tests {
         )));
         // No symbol → cash correction
         assert!(is_cash(&classify("ADJUSTMENT", "", None, None)));
+        assert!(is_resolve(&classify("ADJUSTMENT", "CASH", None, None)));
         assert!(is_cash(&classify("ADJUSTMENT", "$CASH-CAD", None, None)));
         assert!(is_cash(&classify("ADJUSTMENT", "----", None, None)));
     }
@@ -534,6 +543,14 @@ mod tests {
             Some(dec!(50)),
             Some(dec!(0))
         )));
+        // Bare CASH is also a listed security symbol, so quantity makes this
+        // an asset transfer. Currency-qualified CASH remains a placeholder.
+        assert!(is_resolve(&classify(
+            "TRANSFER_IN",
+            "CASH",
+            Some(dec!(4)),
+            None
+        )));
     }
 
     #[test]
@@ -558,6 +575,7 @@ mod tests {
             Some(dec!(0)),
             Some(dec!(0))
         )));
+        assert!(is_review(&classify("TRANSFER_IN", "CASH", None, None)));
     }
 
     #[test]

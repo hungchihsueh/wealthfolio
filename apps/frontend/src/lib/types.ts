@@ -139,6 +139,7 @@ export interface Activity {
   quantity?: string | null;
   unitPrice?: string | null;
   amount?: string | null;
+  amountMode?: "calculated" | "custom";
   fee?: string | null;
   tax?: string | null;
   currency: string;
@@ -209,6 +210,7 @@ export interface ActivityDetails {
   quantity: string | null;
   unitPrice: string | null;
   amount: string | null;
+  amountMode?: "calculated" | "custom";
   fee: string | null;
   tax?: string | null;
   currency: string;
@@ -289,6 +291,7 @@ export interface ActivityCreate {
   quantity?: string | number | null;
   unitPrice?: string | number | null;
   amount?: string | number | null;
+  amountMode?: "calculated" | "custom";
   currency?: string;
   fee?: string | number | null;
   tax?: string | number | null;
@@ -315,6 +318,7 @@ export interface ActivityUpdate {
   quantity?: string | number | null;
   unitPrice?: string | number | null;
   amount?: string | number | null;
+  amountMode?: "calculated" | "custom";
   currency?: string;
   fee?: string | number | null;
   tax?: string | number | null;

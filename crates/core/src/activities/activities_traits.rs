@@ -479,7 +479,7 @@ pub trait ActivityServiceTrait: Send + Sync {
 
     /// Canonicalizes existing cash magnitudes and derives missing amounts.
     /// Safe to call more than once; only changed rows are persisted.
-    async fn migrate_activity_cash_amounts(&self) -> Result<usize>;
+    async fn migrate_activity_cash_amounts(&self) -> Result<ActivityCashMigrationResult>;
 
     /// Prepares activities for normal save/create flows.
     /// Uses only payload metadata (no live symbol/provider resolution).

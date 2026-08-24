@@ -503,6 +503,7 @@ describe("activity-utils", () => {
 
       expect(JSON.parse(result.creates[0].metadata ?? "{}")).toEqual({
         contract_multiplier: 10,
+        cash_amount: { mode: "custom" },
       });
     });
 
@@ -523,7 +524,9 @@ describe("activity-utils", () => {
         "USD",
       );
 
-      expect(JSON.parse(result.updates[0].metadata ?? "missing")).toEqual({});
+      expect(JSON.parse(result.updates[0].metadata ?? "missing")).toEqual({
+        cash_amount: { mode: "custom" },
+      });
     });
 
     it("should preserve absent metadata when editing a persisted row", () => {
@@ -543,7 +546,9 @@ describe("activity-utils", () => {
         "USD",
       );
 
-      expect(result.updates[0].metadata).toBeUndefined();
+      expect(JSON.parse(result.updates[0].metadata ?? "missing")).toEqual({
+        cash_amount: { mode: "custom" },
+      });
     });
 
     it.each([true, false])(
@@ -578,6 +583,7 @@ describe("activity-utils", () => {
 
         expect(JSON.parse(result.creates[0].metadata ?? "{}")).toEqual({
           flow: { is_external: isExternal },
+          cash_amount: { mode: "custom" },
         });
       },
     );
@@ -606,7 +612,9 @@ describe("activity-utils", () => {
         "USD",
       );
 
-      expect(result.creates[0].metadata).toBeUndefined();
+      expect(JSON.parse(result.creates[0].metadata ?? "missing")).toEqual({
+        cash_amount: { mode: "custom" },
+      });
     });
 
     it("should include existing asset id selected from search for new market activities", () => {
@@ -956,6 +964,28 @@ describe("activity-utils", () => {
       expect(updated.amount).toBe("227");
     });
 
+    it("treats the shared value editor as a confirmed custom total for cash rows", () => {
+      const updated = applyTransactionUpdate({
+        transaction: createMockTransaction({
+          activityType: ActivityType.DEPOSIT,
+          quantity: null,
+          unitPrice: null,
+          amount: "50",
+          amountMode: "custom",
+        }),
+        field: "unitPrice",
+        value: "075.25",
+        accountLookup: new Map(),
+        assetCurrencyLookup: new Map(),
+        fallbackCurrency: "USD",
+        resolveTransactionCurrency: () => "USD",
+      });
+
+      expect(updated.amount).toBe("75.25");
+      expect(updated.amountMode).toBe("custom");
+      expect(updated.amountConfirmed).toBe(true);
+    });
+
     it("recalculates SELL totals and applies the option multiplier", () => {
       const tx = createMockTransaction({
         activityType: ActivityType.SELL,
@@ -1156,7 +1186,7 @@ describe("activity-utils", () => {
       expect(updated.amountMode).toBe("custom");
     });
 
-    it("preserves a trusted BUY total when trade details change", () => {
+    it("returns a custom BUY total to calculated when trade details change", () => {
       const tx = createMockTransaction({
         quantity: "0.001",
         unitPrice: "589.8108",
@@ -1176,11 +1206,11 @@ describe("activity-utils", () => {
         resolveTransactionCurrency: () => "USD",
       });
 
-      expect(updated.amount).toBe("0.3");
-      expect(updated.amountMode).toBe("custom");
+      expect(updated.amount).toBe("0.6");
+      expect(updated.amountMode).toBe("calculated");
     });
 
-    it("preserves a trusted asset-backed income total when quantity changes", () => {
+    it("returns custom asset-backed income to calculated when quantity changes", () => {
       const accountLookup = new Map<string, { id: string; name: string; currency: string }>([
         ["account-1", { id: "account-1", name: "Test Account", currency: "USD" }],
       ]);
@@ -1204,8 +1234,8 @@ describe("activity-utils", () => {
         resolveTransactionCurrency: () => "USD",
       });
 
-      expect(updated.amount).toBe("0.2");
-      expect(updated.amountMode).toBe("custom");
+      expect(updated.amount).toBe("4.98");
+      expect(updated.amountMode).toBe("calculated");
     });
 
     it("recalculates asset-backed income only while its total is calculated", () => {

@@ -3,7 +3,7 @@ use diesel::expression_methods::ExpressionMethods;
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::sql_query;
-use diesel::sql_types::{Bool, Nullable, Text};
+use diesel::sql_types::{Bool, Integer, Nullable, Text};
 use diesel::sqlite::Sqlite;
 use diesel::sqlite::SqliteConnection;
 use rust_decimal::Decimal;
@@ -23,7 +23,9 @@ use wealthfolio_core::activities::{
 };
 use wealthfolio_core::assets::{Asset, InstrumentType};
 use wealthfolio_core::limits::ContributionActivity;
-use wealthfolio_core::portfolio::economic_events::ActivityEconomicsResolver;
+use wealthfolio_core::portfolio::economic_events::{
+    ActivityCashInputs, ActivityEconomicsResolver, LegacyActivityCashClassification,
+};
 use wealthfolio_core::quotes::store::QuoteStore;
 use wealthfolio_core::{Error, Result};
 
@@ -57,6 +59,79 @@ fn apply_decimal_patch(existing: Option<String>, patch: Option<Option<Decimal>>)
         None => existing,
         Some(None) => None,
         Some(Some(value)) => Some(value.to_string()),
+    }
+}
+
+fn cash_amount_update_clears_review(update: &ActivityUpdate, existing: &ActivityDB) -> bool {
+    let explicitly_confirmed = update
+        .metadata
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+        .and_then(|metadata| {
+            metadata
+                .pointer("/cash_amount/confirmed")
+                .and_then(serde_json::Value::as_bool)
+        })
+        .unwrap_or(false);
+    let amount_changed = match update.amount {
+        Some(Some(candidate)) => existing
+            .amount
+            .as_deref()
+            .and_then(|amount| Decimal::from_str(amount).ok())
+            .is_none_or(|current| current.abs() != candidate.abs()),
+        Some(None) => existing.amount.is_some(),
+        None => false,
+    };
+
+    explicitly_confirmed || amount_changed
+}
+
+fn remove_transient_cash_amount_confirmation(metadata: &mut Option<String>) {
+    let Some(raw_metadata) = metadata.as_deref() else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw_metadata) else {
+        return;
+    };
+    let Some(cash_amount) = value
+        .get_mut("cash_amount")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    if cash_amount.remove("confirmed").is_some() {
+        *metadata = serde_json::to_string(&value).ok();
+    }
+}
+
+fn preserve_cash_amount_migration_metadata(
+    existing_metadata: Option<&str>,
+    incoming_metadata: &mut Option<String>,
+) {
+    let Some(migration) = existing_metadata
+        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+        .and_then(|metadata| metadata.pointer("/migrations/cash_amount_v3_8").cloned())
+    else {
+        return;
+    };
+
+    let mut metadata = incoming_metadata
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Some(root) = metadata.as_object_mut() else {
+        return;
+    };
+    let migrations = root
+        .entry("migrations")
+        .or_insert_with(|| serde_json::json!({}));
+    if !migrations.is_object() {
+        *migrations = serde_json::json!({});
+    }
+    if let Some(migrations) = migrations.as_object_mut() {
+        migrations.insert("cash_amount_v3_8".to_string(), migration);
+        *incoming_metadata = serde_json::to_string(&metadata).ok();
     }
 }
 
@@ -471,9 +546,9 @@ impl ActivityRepository {
             }
             if let Some(needs_review) = needs_review_filter {
                 if needs_review {
-                    query = query.filter(activities::status.eq("DRAFT"));
+                    query = query.filter(activities::needs_review.ne(0));
                 } else {
-                    query = query.filter(activities::status.ne("DRAFT"));
+                    query = query.filter(activities::needs_review.eq(0));
                 }
             }
             if let Some(from_utc) = date_from_utc {
@@ -735,15 +810,15 @@ impl ActivityRepositoryTrait for ActivityRepository {
 
     fn search_activities(
         &self,
-        page: i64,                                   // Page number, 0-based
-        page_size: i64,                              // Number of items per page
-        account_id_filter: Option<Vec<String>>,      // Optional account_id filter
-        activity_type_filter: Option<Vec<String>>,   // Optional activity_type filter
-        asset_id_keyword: Option<String>,            // Optional asset_id keyword for search
-        sort: Option<Sort>,                          // Optional sort
-        needs_review_filter: Option<bool>, // Optional needs_review filter (maps to DRAFT status)
-        date_from: Option<NaiveDate>,      // Optional start date filter (inclusive)
-        date_to: Option<NaiveDate>,        // Optional end date filter (inclusive)
+        page: i64,                                 // Page number, 0-based
+        page_size: i64,                            // Number of items per page
+        account_id_filter: Option<Vec<String>>,    // Optional account_id filter
+        activity_type_filter: Option<Vec<String>>, // Optional activity_type filter
+        asset_id_keyword: Option<String>,          // Optional asset_id keyword for search
+        sort: Option<Sort>,                        // Optional sort
+        needs_review_filter: Option<bool>,
+        date_from: Option<NaiveDate>, // Optional start date filter (inclusive)
+        date_to: Option<NaiveDate>,   // Optional end date filter (inclusive)
         instrument_type_filter: Option<Vec<String>>, // Optional instrument_type filter
         activity_id_filter: Option<Vec<String>>, // Optional exact activity-id filter
     ) -> Result<ActivitySearchResponse> {
@@ -835,6 +910,8 @@ impl ActivityRepositoryTrait for ActivityRepository {
                 let provider_account_id =
                     provider_account_id_for_broker_activity(tx.conn(), &existing)?;
                 let existing_before_update = existing.clone();
+                let preserve_needs_review =
+                    !cash_amount_update_clears_review(&activity_update_owned, &existing);
 
                 // Preserve fields from existing record that shouldn't be overwritten
                 let ActivityDB {
@@ -855,6 +932,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
                     amount,
                     fee,
                     tax,
+                    needs_review,
                     ..
                 } = existing;
 
@@ -903,6 +981,16 @@ impl ActivityRepositoryTrait for ActivityRepository {
                 if activity_to_update.metadata.is_none() {
                     activity_to_update.metadata = metadata;
                 }
+                preserve_cash_amount_migration_metadata(
+                    existing_before_update.metadata.as_deref(),
+                    &mut activity_to_update.metadata,
+                );
+                remove_transient_cash_amount_confirmation(&mut activity_to_update.metadata);
+                activity_to_update.needs_review = if preserve_needs_review {
+                    needs_review
+                } else {
+                    0
+                };
                 clear_invalid_source_group_for_external_transfer(
                     tx.conn(),
                     &mut activity_to_update,
@@ -1248,6 +1336,8 @@ impl ActivityRepositoryTrait for ActivityRepository {
                     let provider_account_id =
                         provider_account_id_for_broker_activity(tx.conn(), &existing)?;
                     let existing_before_update = existing.clone();
+                    let preserve_needs_review =
+                        !cash_amount_update_clears_review(&update_owned, &existing);
 
                     // Preserve fields from existing record
                     let ActivityDB {
@@ -1268,6 +1358,7 @@ impl ActivityRepositoryTrait for ActivityRepository {
                         fee,
                         tax,
                         fx_rate,
+                        needs_review,
                         ..
                     } = existing;
 
@@ -1311,6 +1402,16 @@ impl ActivityRepositoryTrait for ActivityRepository {
                     if activity_db.metadata.is_none() {
                         activity_db.metadata = metadata;
                     }
+                    preserve_cash_amount_migration_metadata(
+                        existing_before_update.metadata.as_deref(),
+                        &mut activity_db.metadata,
+                    );
+                    remove_transient_cash_amount_confirmation(&mut activity_db.metadata);
+                    activity_db.needs_review = if preserve_needs_review {
+                        needs_review
+                    } else {
+                        0
+                    };
                     clear_invalid_source_group_for_external_transfer(tx.conn(), &mut activity_db)?;
                     preserve_broker_base_type(
                         &mut activity_db,
@@ -2042,21 +2143,16 @@ impl ActivityRepositoryTrait for ActivityRepository {
             .exec_tx(move |tx| -> Result<usize> {
                 let mut changed = 0;
                 for update in updates {
-                    let amount = update.amount.to_string();
-                    changed += if let Some(idempotency_key) = update.idempotency_key {
-                        diesel::update(activities::table.find(&update.id))
-                            .set((
-                                activities::amount.eq(amount),
-                                activities::idempotency_key.eq(idempotency_key),
-                            ))
-                            .execute(tx.conn())
-                            .map_err(StorageError::from)?
-                    } else {
-                        diesel::update(activities::table.find(&update.id))
-                            .set(activities::amount.eq(amount))
-                            .execute(tx.conn())
-                            .map_err(StorageError::from)?
-                    };
+                    let amount = update.amount.map(|amount| amount.to_string());
+                    let metadata = update.metadata.map(|metadata| metadata.to_string());
+                    changed += diesel::update(activities::table.find(&update.id))
+                        .set((
+                            activities::amount.eq(amount),
+                            activities::metadata.eq(metadata),
+                            activities::needs_review.eq(i32::from(update.needs_review)),
+                        ))
+                        .execute(tx.conn())
+                        .map_err(StorageError::from)?;
                 }
                 Ok(changed)
             })
@@ -2212,6 +2308,8 @@ impl ActivityRepositoryTrait for ActivityRepository {
              a.unit_price,
              a.fee,
              a.tax,
+             a.metadata as activity_metadata,
+             a.needs_review,
              ast.instrument_type,
              ast.metadata as asset_metadata
              FROM activities a
@@ -2263,6 +2361,10 @@ impl ActivityRepositoryTrait for ActivityRepository {
             #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
             pub tax: Option<String>,
             #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            pub activity_metadata: Option<String>,
+            #[diesel(sql_type = Integer)]
+            pub needs_review: i32,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
             pub instrument_type: Option<String>,
             #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
             pub asset_metadata: Option<String>,
@@ -2307,48 +2409,92 @@ impl ActivityRepositoryTrait for ActivityRepository {
                 if !account_supports_purpose(&raw.account_type, AccountPurpose::Income) {
                     return None;
                 }
-                let stored_amount = parse_decimal(raw.amount.as_deref()).abs();
+                let stored_amount = raw
+                    .amount
+                    .as_deref()
+                    .and_then(|value| Decimal::from_str(value).ok());
                 let fee = parse_decimal(raw.fee.as_deref()).abs();
                 let tax = parse_decimal(raw.tax.as_deref()).abs();
                 let asset_backed = is_asset_backed(&raw.income_type, raw.subtype.as_deref());
                 let mut currency = raw.currency;
-                let amount = if asset_backed && stored_amount.is_zero() {
-                    let quantity = parse_decimal(raw.quantity.as_deref()).abs();
-                    let reported_price = parse_decimal(raw.unit_price.as_deref()).abs();
+                let quantity = raw
+                    .quantity
+                    .as_deref()
+                    .and_then(|value| Decimal::from_str(value).ok());
+                let reported_price = raw
+                    .unit_price
+                    .as_deref()
+                    .and_then(|value| Decimal::from_str(value).ok());
+                let mut effective_price = reported_price;
+                if asset_backed
+                    && stored_amount.is_none_or(|amount| amount.is_zero())
+                    && reported_price.is_none_or(|price| price.is_zero())
+                {
                     let request_date = Self::parse_activity_instant_utc(&raw.activity_date)
                         .map(|instant| instant.date_naive());
                     let quote = raw.source_asset_id.as_ref().and_then(|asset_id| {
                         request_date
                             .and_then(|date| quotes_by_request.get(&(asset_id.clone(), date)))
                     });
-                    let price = if reported_price > Decimal::ZERO {
-                        reported_price
-                    } else {
-                        quote
-                            .map(|quote| quote.close.abs())
-                            .unwrap_or(Decimal::ZERO)
-                    };
-                    if reported_price.is_zero() {
-                        if let Some(quote) = quote {
-                            currency = quote.currency.clone();
+                    if let Some(quote) = quote {
+                        effective_price = Some(quote.close.abs());
+                        currency = quote.currency.clone();
+                    }
+                }
+                let asset_multiplier = ActivityEconomicsResolver::asset_unit_multiplier(&Asset {
+                    instrument_type: raw
+                        .instrument_type
+                        .as_deref()
+                        .and_then(InstrumentType::from_db_str),
+                    metadata: raw
+                        .asset_metadata
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str(value).ok()),
+                    ..Default::default()
+                });
+                let activity_metadata = raw
+                    .activity_metadata
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
+                let multiplier = activity_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("contract_multiplier"))
+                    .and_then(|value| match value {
+                        serde_json::Value::String(value) => Decimal::from_str(value).ok(),
+                        serde_json::Value::Number(value) => {
+                            Decimal::from_str(&value.to_string()).ok()
                         }
-                    }
-                    let multiplier = Asset {
-                        instrument_type: raw
-                            .instrument_type
-                            .as_deref()
-                            .and_then(InstrumentType::from_db_str),
-                        metadata: raw
-                            .asset_metadata
-                            .as_deref()
-                            .and_then(|value| serde_json::from_str(value).ok()),
-                        ..Default::default()
-                    }
-                    .contract_multiplier();
-                    quantity * price * multiplier
-                } else {
-                    stored_amount + fee + tax
-                };
+                        _ => None,
+                    })
+                    .filter(|value| *value > Decimal::ZERO)
+                    .unwrap_or(asset_multiplier);
+                let legacy_gross_compatibility = raw.needs_review != 0
+                    && activity_metadata
+                        .as_ref()
+                        .and_then(|metadata| {
+                            metadata
+                                .pointer("/migrations/cash_amount_v3_8/classification")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .as_deref()
+                        == Some(LegacyActivityCashClassification::Ambiguous.as_str());
+                let amount =
+                    ActivityEconomicsResolver::resolve_cash_inputs_with_legacy_compatibility(
+                        ActivityCashInputs {
+                            activity_type: &raw.income_type,
+                            is_security_transfer: false,
+                            quantity,
+                            unit_price: effective_price,
+                            amount: stored_amount,
+                            fee: Some(fee),
+                            tax: Some(tax),
+                            unit_multiplier: multiplier,
+                        },
+                        legacy_gross_compatibility,
+                    )
+                    .gross_amount
+                    .unwrap_or_else(|| stored_amount.unwrap_or(Decimal::ZERO).abs() + fee + tax);
                 Some(IncomeData {
                     date: raw.date,
                     income_type: raw.income_type,
@@ -2686,6 +2832,19 @@ impl ActivityRepositoryTrait for ActivityRepository {
                     .collect::<HashSet<_>>()
                     .into_iter()
                     .collect();
+                let mut existing_context: HashMap<String, (String, Option<String>)> =
+                    if candidate_ids.is_empty() {
+                        HashMap::new()
+                    } else {
+                        activities::table
+                            .filter(activities::id.eq_any(&candidate_ids))
+                            .select((activities::id, activities::status, activities::metadata))
+                            .load::<(String, String, Option<String>)>(tx.conn())
+                            .map_err(StorageError::from)?
+                            .into_iter()
+                            .map(|(id, status, metadata)| (id, (status, metadata)))
+                            .collect()
+                    };
                 let existing_split_assets: HashMap<String, String> = if candidate_ids.is_empty() {
                     HashMap::new()
                 } else {
@@ -2796,6 +2955,27 @@ impl ActivityRepositoryTrait for ActivityRepository {
                         }
                     }
 
+                    if will_update {
+                        if let Some((existing_status, existing_metadata)) =
+                            existing_context.get(&activity_db.id)
+                        {
+                            preserve_cash_amount_migration_metadata(
+                                existing_metadata.as_deref(),
+                                &mut activity_db.metadata,
+                            );
+                            if activity_db.status == "DRAFT"
+                                && activity_db.needs_review != 0
+                                && existing_status == "POSTED"
+                            {
+                                // New uncertain broker rows start as Draft. A resync of
+                                // an already-posted historical row must not silently
+                                // remove it from calculations; surface it through
+                                // needs_review instead.
+                                activity_db.status = "POSTED".to_string();
+                            }
+                        }
+                    }
+
                     match diesel::insert_into(activities::table)
                         .values(&activity_db)
                         .on_conflict(activities::id)
@@ -2836,6 +3016,10 @@ impl ActivityRepositoryTrait for ActivityRepository {
                                 }
 
                                 existing_by_id.insert(activity_db.id.clone(), 0);
+                                existing_context.insert(
+                                    activity_db.id.clone(),
+                                    (activity_db.status.clone(), activity_db.metadata.clone()),
+                                );
                                 if let Some(key) = activity_db.idempotency_key.clone() {
                                     existing_by_idemp.insert(key, (activity_db.id.clone(), 0));
                                 }
@@ -3448,6 +3632,7 @@ mod tests {
         }
 
         repo.update_activity(ActivityUpdate {
+            amount_mode: None,
             id: "broker-local-activity".to_string(),
             account_id: "broker-local-account".to_string(),
             asset: None,
@@ -3485,7 +3670,10 @@ mod tests {
             .select(activities::needs_review)
             .first::<i32>(&mut conn)
             .expect("broker activity needs_review");
-        assert_eq!(needs_review, 0);
+        assert_eq!(
+            needs_review, 1,
+            "non-amount edits must preserve review state"
+        );
 
         let rows = sync_outbox::table
             .select((
@@ -3509,11 +3697,50 @@ mod tests {
         assert_eq!(payload["overlay"]["notes"], "User note");
         assert_eq!(payload["overlay"]["activityTypeOverride"], "SELL");
         assert_eq!(payload["overlay"]["subtype"], "DRIP");
-        assert_eq!(payload["overlay"]["needsReview"], false);
+        assert_eq!(payload["overlay"]["needsReview"], true);
         assert!(payload.get("account_id").is_none());
         assert!(payload.get("amount").is_none());
         assert!(payload.get("import_run_id").is_none());
         assert!(payload.get("source_group_id").is_none());
+
+        drop(conn);
+        repo.update_activity(ActivityUpdate {
+            amount_mode: None,
+            id: "broker-local-activity".to_string(),
+            account_id: "broker-local-account".to_string(),
+            asset: None,
+            activity_type: "SELL".to_string(),
+            subtype: Some("DRIP".to_string()),
+            activity_date: "2026-01-01T00:00:00Z".to_string(),
+            settlement_date: None,
+            quantity: None,
+            unit_price: None,
+            currency: "USD".to_string(),
+            fee: None,
+            tax: None,
+            amount: Some(Some(Decimal::from(50))),
+            status: Some(ActivityStatus::Posted),
+            notes: Some("User note".to_string()),
+            fx_rate: None,
+            metadata: Some(r#"{"cash_amount":{"mode":"custom","confirmed":true}}"#.to_string()),
+        })
+        .await
+        .expect("confirmed amount update");
+
+        let mut conn = get_connection(&pool).expect("conn");
+        let (needs_review, metadata) = activities::table
+            .find("broker-local-activity")
+            .select((activities::needs_review, activities::metadata))
+            .first::<(i32, Option<String>)>(&mut conn)
+            .expect("confirmed activity row");
+        assert_eq!(needs_review, 0, "an explicit final total confirms the row");
+        let metadata: serde_json::Value = serde_json::from_str(metadata.as_deref().unwrap_or("{}"))
+            .expect("valid activity metadata");
+        assert_eq!(
+            metadata.pointer("/cash_amount/mode"),
+            Some(&serde_json::json!("custom"))
+        );
+        assert!(metadata.pointer("/cash_amount/confirmed").is_none());
     }
 
     #[tokio::test]
@@ -3719,6 +3946,7 @@ mod tests {
         }
 
         repo.update_activity(ActivityUpdate {
+            amount_mode: None,
             id: "broker-activity-with-override".to_string(),
             account_id: "broker-local-account".to_string(),
             asset: None,
@@ -3755,6 +3983,7 @@ mod tests {
         assert_eq!(type_row.2.as_deref(), Some("New note"));
 
         repo.update_activity(ActivityUpdate {
+            amount_mode: None,
             id: "broker-activity-with-override".to_string(),
             account_id: "broker-local-account".to_string(),
             asset: None,
@@ -3808,6 +4037,7 @@ mod tests {
         }
 
         repo.update_activity(ActivityUpdate {
+            amount_mode: None,
             id: "broker-owned-local-edit".to_string(),
             account_id: "broker-local-account".to_string(),
             asset: None,
@@ -4038,6 +4268,7 @@ mod tests {
 
         let updated = repo
             .update_activity(ActivityUpdate {
+                amount_mode: None,
                 id: "activity-subtype".to_string(),
                 account_id: "acc-subtype".to_string(),
                 asset: None,
@@ -4081,6 +4312,7 @@ mod tests {
         }
 
         repo.update_activity(ActivityUpdate {
+            amount_mode: None,
             id: "activity-with-splits".to_string(),
             account_id: "acc-splits".to_string(),
             asset: None,
@@ -4094,7 +4326,7 @@ mod tests {
             fee: None,
             tax: None,
             amount: Some(Some(Decimal::new(125, 0))),
-            status: None,
+            status: Some(ActivityStatus::Draft),
             notes: None,
             fx_rate: None,
             metadata: None,
@@ -4113,7 +4345,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn income_report_derives_asset_backed_amount_only_for_valid_type_subtype_pair() {
+    async fn income_report_derives_missing_supported_income_amounts() {
         let (pool, writer) = setup_db();
         let repo = ActivityRepository::new(pool.clone(), writer);
         let mut conn = get_connection(&pool).expect("conn");
@@ -4156,7 +4388,7 @@ mod tests {
             .map(|row| row.amount);
 
         assert_eq!(staking_amount, Some(Decimal::new(100, 0)));
-        assert_eq!(metadata_amount, Some(Decimal::ZERO));
+        assert_eq!(metadata_amount, Some(Decimal::new(100, 0)));
     }
 
     #[tokio::test]
@@ -4174,6 +4406,14 @@ mod tests {
             None,
             None,
         );
+        insert_activity_with_subtype(
+            &mut conn,
+            "legacy-gross-dividend",
+            "acc-gross-income",
+            "DIVIDEND",
+            None,
+            None,
+        );
 
         diesel::sql_query(
             "UPDATE activities SET amount = '90', fee = '2', tax = '8' \
@@ -4181,13 +4421,20 @@ mod tests {
         )
         .execute(&mut conn)
         .expect("set net dividend and charges");
+        diesel::sql_query(
+            "UPDATE activities SET amount = '100', fee = '2', tax = '8', needs_review = 1, \
+               metadata = '{\"migrations\":{\"cash_amount_v3_8\":{\"classification\":\"ambiguous\"}}}' \
+             WHERE id = 'legacy-gross-dividend'",
+        )
+        .execute(&mut conn)
+        .expect("set ambiguous legacy gross dividend");
 
         let rows = repo
             .get_income_activities_data(Some(&[String::from("acc-gross-income")]))
             .expect("income data");
 
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].amount, Decimal::new(100, 0));
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.amount == Decimal::new(100, 0)));
     }
 
     #[tokio::test]
@@ -4550,6 +4797,7 @@ mod tests {
 
         let updated = repo
             .update_activity(ActivityUpdate {
+                amount_mode: None,
                 id: "orphan-in".to_string(),
                 account_id: "acc-a".to_string(),
                 asset: None,
@@ -5062,7 +5310,18 @@ mod tests {
             status: None,
             notes: Some("first import".to_string()),
             fx_rate: None,
-            metadata: None,
+            metadata: Some(
+                serde_json::json!({
+                    "cash_amount": { "mode": "custom" },
+                    "migrations": {
+                        "cash_amount_v3_8": {
+                            "classification": "ambiguous",
+                            "original_amount": "100"
+                        }
+                    }
+                })
+                .to_string(),
+            ),
             needs_review: None,
             source_system: Some("SNAPTRADE".to_string()),
             source_record_id: Some("txn-1".to_string()),
@@ -5085,11 +5344,11 @@ mod tests {
             fee: Some(Decimal::ZERO),
             tax: None,
             amount: Some(Decimal::from(101)),
-            status: None,
+            status: Some(ActivityStatus::Draft),
             notes: Some("updated import".to_string()),
             fx_rate: None,
-            metadata: None,
-            needs_review: None,
+            metadata: Some(serde_json::json!({ "broker": { "transaction": "txn-1" } }).to_string()),
+            needs_review: Some(true),
             source_system: Some("SNAPTRADE".to_string()),
             source_record_id: Some("txn-1".to_string()),
             source_group_id: None,
@@ -5119,6 +5378,8 @@ mod tests {
             Option<String>,
             Option<String>,
             Option<String>,
+            String,
+            i32,
         )> = activities::table
             .filter(activities::account_id.eq("acc-sync"))
             .select((
@@ -5128,6 +5389,8 @@ mod tests {
                 activities::source_record_id,
                 activities::idempotency_key,
                 activities::settlement_date,
+                activities::status,
+                activities::needs_review,
             ))
             .load(&mut conn)
             .expect("load synced activities");
@@ -5150,6 +5413,21 @@ mod tests {
         assert_eq!(rows[0].3.as_deref(), Some("txn-1"));
         assert_eq!(rows[0].4.as_deref(), Some("idemp-2"));
         assert_eq!(rows[0].5.as_deref(), Some("2024-01-18T00:00:00+00:00"));
+        assert_eq!(
+            rows[0].6, "POSTED",
+            "resync must not remove an existing reviewed row from calculations"
+        );
+        assert_eq!(rows[0].7, 1);
+        let metadata = activity_metadata(&mut conn, "provider-id-1");
+        assert_eq!(metadata["broker"]["transaction"], "txn-1");
+        assert_eq!(
+            metadata["migrations"]["cash_amount_v3_8"]["classification"],
+            "ambiguous"
+        );
+        assert_eq!(
+            metadata["migrations"]["cash_amount_v3_8"]["original_amount"],
+            "100"
+        );
     }
 
     #[tokio::test]

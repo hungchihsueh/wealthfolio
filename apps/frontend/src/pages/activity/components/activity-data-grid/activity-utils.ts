@@ -70,6 +70,11 @@ const isAlwaysCashActivity = (
   );
 };
 
+const usesCalculatedAmount = (transaction: LocalTransaction): boolean =>
+  transaction.activityType === ActivityType.BUY ||
+  transaction.activityType === ActivityType.SELL ||
+  isAssetBackedIncomeSubtype(transaction.activityType, transaction.subtype);
+
 /**
  * Converts a value to a string for API payloads.
  * Returns null for explicit null (clear), undefined for missing/invalid values.
@@ -247,11 +252,11 @@ export function applyCalculatedTradeTotal(transaction: LocalTransaction): LocalT
   const gross = quantity * unitPrice * getContractMultiplier(transaction);
   const charges = Number(transaction.fee || 0) + Number(transaction.tax || 0);
   const total = transaction.activityType === ActivityType.BUY ? gross + charges : gross - charges;
-  const rounded = total > 0 ? roundDecimal(total, DECIMAL_PRECISION) : undefined;
+  const rounded = roundDecimal(Math.abs(total), DECIMAL_PRECISION);
 
   return {
     ...transaction,
-    amount: rounded === undefined ? null : (normalizeDecimalString(rounded) ?? null),
+    amount: normalizeDecimalString(rounded) ?? null,
   };
 }
 
@@ -284,34 +289,67 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
     }
   } else if (field === "quantity") {
     const newQty = normalizedDecimalOrNull(value);
-    updated = { ...updated, quantity: newQty };
+    updated = {
+      ...updated,
+      quantity: newQty,
+      amountMode: usesCalculatedAmount(updated) ? "calculated" : updated.amountMode,
+      amountConfirmed: usesCalculatedAmount(updated) ? false : updated.amountConfirmed,
+    };
     updated = applySplitDefaults(updated);
   } else if (field === "unitPrice") {
     const newUnitPrice = normalizedDecimalOrNull(value);
-    updated = { ...updated, unitPrice: newUnitPrice };
+    updated = {
+      ...updated,
+      unitPrice: newUnitPrice,
+      amountMode: usesCalculatedAmount(updated) ? "calculated" : updated.amountMode,
+      amountConfirmed: usesCalculatedAmount(updated) ? false : updated.amountConfirmed,
+    };
     if (
       newUnitPrice != null &&
       (isAlwaysCashActivity(updated.activityType, updated.subtype) ||
         (isIncomeActivity(updated.activityType) &&
           !isAssetBackedIncomeSubtype(updated.activityType, updated.subtype)))
     ) {
-      updated = { ...updated, amount: newUnitPrice };
+      // For cash-only rows the grid's value cell is the explicit final total,
+      // even though it is backed by the shared unitPrice editor.
+      updated = {
+        ...updated,
+        amount: newUnitPrice,
+        amountMode: "custom",
+        amountConfirmed: true,
+      };
     }
     updated = applySplitDefaults(updated);
   } else if (field === "amount") {
     if (value == null || value === "") {
-      updated = { ...updated, amount: null, amountMode: "calculated" };
+      updated = {
+        ...updated,
+        amount: null,
+        amountMode: "calculated",
+        amountConfirmed: false,
+      };
     } else {
       updated = {
         ...updated,
         amount: normalizeDecimalString(value) ?? null,
         amountMode: "custom",
+        amountConfirmed: true,
       };
     }
   } else if (field === "fee") {
-    updated = { ...updated, fee: normalizedDecimalOrNull(value) };
+    updated = {
+      ...updated,
+      fee: normalizedDecimalOrNull(value),
+      amountMode: usesCalculatedAmount(updated) ? "calculated" : updated.amountMode,
+      amountConfirmed: usesCalculatedAmount(updated) ? false : updated.amountConfirmed,
+    };
   } else if (field === "tax") {
-    updated = { ...updated, tax: normalizedDecimalOrNull(value) };
+    updated = {
+      ...updated,
+      tax: normalizedDecimalOrNull(value),
+      amountMode: usesCalculatedAmount(updated) ? "calculated" : updated.amountMode,
+      amountConfirmed: usesCalculatedAmount(updated) ? false : updated.amountConfirmed,
+    };
   } else if (field === "assetSymbol") {
     const upper = (typeof value === "string" ? value : "").trim().toUpperCase();
     const previousSymbol = (updated.assetSymbol ?? "").trim().toUpperCase();
@@ -550,6 +588,16 @@ export function buildSavePayload(
         is_external: transaction.isExternal,
       };
     }
+    const cashAmountMetadata: Record<string, unknown> = {
+      ...((metadataForPayload.cash_amount as Record<string, unknown> | undefined) ?? {}),
+      mode: transaction.amountMode ?? (transaction.amount == null ? "calculated" : "custom"),
+    };
+    if (transaction.amountConfirmed === true) {
+      cashAmountMetadata.confirmed = true;
+    } else {
+      delete cashAmountMetadata.confirmed;
+    }
+    metadataForPayload.cash_amount = cashAmountMetadata;
     if (hasExistingMetadata || Object.keys(metadataForPayload).length > 0) {
       metadataJson = JSON.stringify(metadataForPayload);
     }
@@ -570,6 +618,7 @@ export function buildSavePayload(
       quantity: toDecimalString(transaction.quantity),
       unitPrice: toDecimalString(transaction.unitPrice),
       amount: toDecimalString(transaction.amount),
+      amountMode: transaction.amountMode ?? (transaction.amount == null ? "calculated" : "custom"),
       currency: currencyForPayload,
       fee: toDecimalString(transaction.fee),
       tax: toDecimalString(transaction.tax),

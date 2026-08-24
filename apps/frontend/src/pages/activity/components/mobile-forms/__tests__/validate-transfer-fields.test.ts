@@ -243,18 +243,18 @@ describe("allocateInternalSecurityTransferFee", () => {
   it("charges only the outgoing leg for a new internal transfer", () => {
     expect(allocateInternalSecurityTransferFee(2.5)).toEqual({
       transferOutFee: 2.5,
-      transferInFee: undefined,
+      transferInFee: null,
     });
   });
 
   it("updates only the leg that was opened", () => {
     expect(allocateInternalSecurityTransferFee(3, "TRANSFER_OUT")).toEqual({
       transferOutFee: 3,
-      transferInFee: undefined,
+      transferInFee: null,
     });
     expect(allocateInternalSecurityTransferFee(4, "TRANSFER_IN")).toEqual({
-      transferOutFee: undefined,
-      transferInFee: 4,
+      transferOutFee: 4,
+      transferInFee: null,
     });
   });
 });

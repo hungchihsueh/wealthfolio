@@ -23,17 +23,20 @@ pub use activities_model::import_type;
 pub use activities_model::{
     into_field_mapping_values, normalize_context_kind_value, parse_decimal_string_tolerant,
     Activity, ActivityAmountUpdate, ActivityBulkIdentifierMapping, ActivityBulkMutationError,
-    ActivityBulkMutationRequest, ActivityBulkMutationResult, ActivityDetails, ActivityImport,
-    ActivitySearchResponse, ActivitySearchResponseMeta, ActivityStatus, ActivityType,
-    ActivityUpdate, ActivityUpsert, AssetResolutionInput, BrokerActivityProfileConfig,
-    BrokerProfileScope, BrokerSyncProfileData, BulkUpsertResult, FieldMappingValue,
-    ImportActivitiesResult, ImportActivitiesSummary, ImportAssetCandidate, ImportAssetPreviewItem,
-    ImportAssetPreviewStatus, ImportMapping, ImportMappingData, ImportTemplate, ImportTemplateData,
-    ImportTemplateScope, IncomeData, InternalTransferPairRequest, InternalTransferPairResponse,
-    NewActivity, PrepareActivitiesResult, SaveBrokerSyncProfileRulesRequest, Sort, TemplateKind,
+    ActivityBulkMutationRequest, ActivityBulkMutationResult, ActivityCashMigrationResult,
+    ActivityDetails, ActivityImport, ActivitySearchResponse, ActivitySearchResponseMeta,
+    ActivityStatus, ActivityType, ActivityUpdate, ActivityUpsert, AssetResolutionInput,
+    BrokerActivityProfileConfig, BrokerProfileScope, BrokerSyncProfileData, BulkUpsertResult,
+    FieldMappingValue, ImportActivitiesResult, ImportActivitiesSummary, ImportAssetCandidate,
+    ImportAssetPreviewItem, ImportAssetPreviewStatus, ImportMapping, ImportMappingData,
+    ImportTemplate, ImportTemplateData, ImportTemplateScope, IncomeData,
+    InternalTransferPairRequest, InternalTransferPairResponse, NewActivity,
+    PrepareActivitiesResult, SaveBrokerSyncProfileRulesRequest, Sort, TemplateKind,
     TransferMatchCandidate, TransferMatchCandidateRequest,
 };
-pub use activities_service::{run_activity_cash_amount_v3_8, ActivityService};
+pub use activities_service::{
+    rebuild_activity_cash_amount_v3_8, run_activity_cash_amount_v3_8, ActivityService,
+};
 pub use activities_traits::{ActivityRepositoryTrait, ActivityServiceTrait};
 pub use compiler::{ActivityCompiler, DefaultActivityCompiler};
 pub use csv_parser::{parse_csv, ParseConfig, ParseError, ParsedCsvResult};

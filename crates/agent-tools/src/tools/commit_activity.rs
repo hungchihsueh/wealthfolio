@@ -142,6 +142,13 @@ fn draft_to_new_activity(draft: &ActivityDraft) -> Result<NewActivity, AgentTool
         }
     };
 
+    let amount = to_decimal(draft.amount, "amount")?;
+    let amount_mode = if amount.is_none_or(|value| value.is_zero()) {
+        "calculated"
+    } else {
+        "custom"
+    };
+
     Ok(NewActivity {
         id: None,
         account_id,
@@ -155,7 +162,8 @@ fn draft_to_new_activity(draft: &ActivityDraft) -> Result<NewActivity, AgentTool
         currency: draft.currency.clone(),
         fee: to_decimal(draft.fee, "fee")?,
         tax: to_decimal(draft.tax, "tax")?,
-        amount: to_decimal(draft.amount, "amount")?,
+        amount,
+        amount_mode: Some(amount_mode.to_string()),
         status: None,
         notes: draft.notes.clone(),
         fx_rate: None,

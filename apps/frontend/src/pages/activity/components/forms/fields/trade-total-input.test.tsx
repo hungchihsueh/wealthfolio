@@ -69,7 +69,7 @@ describe("TradeTotalInput", () => {
     await waitFor(() => expect(input).toHaveValue("120"));
   });
 
-  it("stops recalculating after the user edits the total", async () => {
+  it("returns a custom total to calculated when trade economics change", async () => {
     const user = userEvent.setup();
     const { rerender } = render(<Harness calculatedAmount={100} />);
     const input = screen.getByTestId("amount-input");
@@ -82,6 +82,7 @@ describe("TradeTotalInput", () => {
 
     rerender(<Harness calculatedAmount={120} />);
 
-    expect(input).toHaveValue("90");
+    await waitFor(() => expect(input).toHaveValue("120"));
+    expect(screen.getByText("Calculated")).toBeInTheDocument();
   });
 });

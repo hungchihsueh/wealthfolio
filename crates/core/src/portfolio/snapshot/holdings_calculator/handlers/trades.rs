@@ -197,7 +197,8 @@ impl HoldingsCalculator {
             cash_quantity,
             quantity,
         );
-        let (cash_currency, cash_effect) = cash_booking(activity, account_currency, cash_effect);
+        let (cash_currency, cash_effect) =
+            trade_cash_booking(activity, account_currency, cash_effect);
         add_cash(state, &cash_currency, cash_effect);
 
         Ok(())
@@ -280,7 +281,7 @@ impl HoldingsCalculator {
 
         let total_proceeds =
             gross_trade_amount(activity, &asset_info) - activity.fee_amt() - activity.tax_amt();
-        let (cash_currency, cash_effect) = cash_booking(
+        let (cash_currency, cash_effect) = trade_cash_booking(
             activity,
             account_currency,
             signed_cash_effect(activity, &asset_info),

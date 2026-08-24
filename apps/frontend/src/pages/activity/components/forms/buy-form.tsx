@@ -156,6 +156,8 @@ export const createBuyFormSchema = (t?: TFunction) =>
       contractMultiplier: z.coerce.number().positive().default(100).optional(),
       assetContractMultiplier: z.coerce.number().positive().default(100).optional(),
       activityMetadata: z.record(z.string(), z.unknown()).optional(),
+      amountMode: z.enum(["calculated", "custom"]).optional(),
+      amountConfirmed: z.boolean().optional(),
     })
     .superRefine((data, ctx) => {
       if (data.amount != null && data.amount <= data.fee + data.tax) {
@@ -291,6 +293,8 @@ export function BuyForm({
       fee: 0,
       tax: 0,
       amount: undefined,
+      amountMode: "calculated",
+      amountConfirmed: false,
       comment: null,
       subtype: null,
       fxRate: undefined,
@@ -605,6 +609,7 @@ export function BuyForm({
             side="buy"
             calculatedAmount={calculatedCashAmount}
             initialAmount={defaultValues?.amount}
+            initialAmountMode={defaultValues?.amountMode}
             currency={currency}
           />
 

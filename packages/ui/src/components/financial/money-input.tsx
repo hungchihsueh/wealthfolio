@@ -79,6 +79,10 @@ const MoneyInput = React.forwardRef<HTMLInputElement, MoneyInputProps>(
     ref,
   ) => {
     const formatting = useNumberFormatting();
+    const [isFocused, setIsFocused] = React.useState(false);
+    const isFocusedRef = React.useRef(false);
+    const lastInputValueRef = React.useRef<number | undefined>(undefined);
+    const [editingValue, setEditingValue] = React.useState("");
     const resolvedPlaceholder =
       placeholder ??
       formatting.formatDecimal(0, {
@@ -88,6 +92,14 @@ const MoneyInput = React.forwardRef<HTMLInputElement, MoneyInputProps>(
       });
     // Normalize value to number or empty string
     const numericValue = value === null || value === undefined || value === "" ? "" : Number(value);
+
+    React.useEffect(() => {
+      if (!isFocusedRef.current) return;
+      const nextValue = numericValue === "" ? undefined : numericValue;
+      if (Object.is(nextValue, lastInputValueRef.current)) return;
+      lastInputValueRef.current = nextValue;
+      setEditingValue(nextValue === undefined ? "" : String(nextValue));
+    }, [numericValue]);
 
     return (
       <NumericFormat
@@ -105,16 +117,32 @@ const MoneyInput = React.forwardRef<HTMLInputElement, MoneyInputProps>(
         data-testid={testId}
         autoFocus={autoFocus}
         onKeyDown={onKeyDown}
-        onBlur={onBlur}
+        onFocus={(event) => {
+          isFocusedRef.current = true;
+          const focusedValue = formatting.parseNumber(event.currentTarget.value);
+          lastInputValueRef.current = focusedValue;
+          setEditingValue(focusedValue === undefined ? "" : String(focusedValue));
+          setIsFocused(true);
+        }}
+        onBlur={(event) => {
+          isFocusedRef.current = false;
+          setIsFocused(false);
+          onBlur?.(event);
+        }}
         allowNegative={false}
         decimalScale={maxDecimalPlaces}
         fixedDecimalScale={fixedDecimalScale}
         thousandSeparator={thousandSeparator ? formatting.groupSeparator : false}
         decimalSeparator={formatting.decimalSeparator}
         allowedDecimalSeparators={Array.from(new Set([formatting.decimalSeparator, ".", ","]))}
-        valueIsNumericString={false}
-        value={numericValue}
-        onValueChange={(values) => {
+        valueIsNumericString={isFocused}
+        value={isFocused ? editingValue : numericValue}
+        onValueChange={(values, sourceInfo) => {
+          // Keep incomplete decimal input (for example `0.`) locally while
+          // the form continues receiving its numeric value.
+          setEditingValue(values.value);
+          if (sourceInfo.source === "prop") return;
+          lastInputValueRef.current = values.floatValue;
           // Prefer onValueChange if provided
           if (onValueChange) {
             onValueChange(values.floatValue);
@@ -144,6 +172,7 @@ const MoneyInput = React.forwardRef<HTMLInputElement, MoneyInputProps>(
           event.preventDefault();
           const parsed = formatting.parseNumber(clipboardValue);
           if (parsed === undefined || parsed < 0) return;
+          if (isFocusedRef.current) setEditingValue(String(parsed));
           onValueChange?.(parsed);
           if (!onValueChange && onChange) {
             onChange({ target: { name, value: parsed } } as unknown as React.ChangeEvent<HTMLInputElement>);

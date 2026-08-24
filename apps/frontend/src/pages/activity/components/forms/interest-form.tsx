@@ -59,6 +59,8 @@ export const createInterestFormSchema = (t?: TFunction) =>
         .positive({
           message: msg(t, "activity:form.err_amount_gt_zero", "Amount must be greater than 0."),
         }),
+      amountMode: z.enum(["calculated", "custom"]).optional(),
+      amountConfirmed: z.boolean().optional(),
       fee: z.coerce
         .number({
           invalid_type_error: msg(t, "activity:form.err_fee_number", "Fee must be a number."),
@@ -221,6 +223,8 @@ export function InterestForm({
       activityDate: new Date(),
       symbol: null,
       amount: undefined,
+      amountMode: "calculated",
+      amountConfirmed: false,
       fee: 0,
       tax: 0,
       quantity: undefined,
@@ -268,6 +272,11 @@ export function InterestForm({
       setValue("quantity", undefined, { shouldDirty: true, shouldValidate: false });
       setValue("unitPrice", undefined, { shouldDirty: true, shouldValidate: false });
     }
+  };
+
+  const handleCashAmountChange = (value: number | undefined) => {
+    setValue("amountMode", value == null ? "calculated" : "custom", { shouldDirty: true });
+    setValue("amountConfirmed", value != null, { shouldDirty: true });
   };
 
   // Get account currency from selected account
@@ -360,6 +369,7 @@ export function InterestForm({
                 side="income"
                 calculatedAmount={calculatedIncomeAmount}
                 initialAmount={defaultValues?.amount}
+                initialAmountMode={defaultValues?.amountMode}
                 currency={currency}
                 label={t("activity:form.label_interest_amount")}
                 helpText={t("activity:form.help_total_credit")}
@@ -372,6 +382,7 @@ export function InterestForm({
                 labelHelpText={t("activity:form.help_total_credit")}
                 currency={currency}
                 data-testid="interest-amount-input"
+                onValueChange={handleCashAmountChange}
               />
             )}
             <AmountInput name="fee" label={t("activity:form.label_fee")} currency={currency} />
